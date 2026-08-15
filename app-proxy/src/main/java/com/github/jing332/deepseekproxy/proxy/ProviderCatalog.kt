@@ -1,0 +1,318 @@
+package com.github.jing332.deepseekproxy.proxy
+
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+
+enum class WebProviderType(
+    val displayName: String,
+    val loginUrl: String?,
+    val cookieOrigins: List<String>
+) {
+    CNB("混元 / CNB", null, emptyList()),
+    DOUBAO_WEB(
+        "豆包 Web",
+        "https://www.doubao.com/chat/",
+        listOf("https://www.doubao.com", "https://doubao.com")
+    ),
+    CHATGPT_WEB(
+        "ChatGPT Web",
+        "https://chatgpt.com/",
+        listOf(
+            "https://chatgpt.com",
+            "https://auth.openai.com",
+            "https://openai.com"
+        )
+    ),
+    GEMINI_WEB(
+        "Gemini Web",
+        "https://gemini.google.com/app",
+        listOf(
+            "https://gemini.google.com",
+            "https://accounts.google.com",
+            "https://www.google.com",
+            "https://google.com",
+        )
+    ),
+    CUSTOM_WEB("自定义 Web", null, emptyList()),
+    KIMI_WEB(
+        "Kimi Web",
+        "https://www.kimi.com/",
+        listOf("https://www.kimi.com", "https://kimi.com")
+    ),
+    DEEPSEEK_WEB(
+        "DeepSeek Web",
+        "https://chat.deepseek.com/",
+        listOf("https://chat.deepseek.com", "https://deepseek.com")
+    ),
+    QWEN_WEB(
+        "千问 Web",
+        "https://www.qianwen.com/",
+        listOf("https://www.qianwen.com", "https://qianwen.com", "https://chat2.qianwen.com")
+    ),
+    QWEN_AI_WEB(
+        "千问国际版 Web",
+        "https://chat.qwen.ai/",
+        listOf("https://chat.qwen.ai")
+    ),
+    MINIMAX_WEB(
+        "MiniMax Web",
+        "https://agent.minimaxi.com/",
+        listOf("https://agent.minimaxi.com")
+    ),
+    MIMO_WEB(
+        "小米 MiMo Web",
+        "https://aistudio.xiaomimimo.com/",
+        listOf("https://aistudio.xiaomimimo.com")
+    ),
+    PERPLEXITY_WEB(
+        "Perplexity Web",
+        "https://www.perplexity.ai/",
+        listOf("https://www.perplexity.ai", "https://perplexity.ai")
+    ),
+    ZAI_WEB(
+        "Z.ai Web",
+        "https://chat.z.ai/",
+        listOf("https://chat.z.ai")
+    ),
+    ARENA_GUEST(
+        "Arena.ai 免登录",
+        "https://arena.ai/text/direct",
+        listOf("https://arena.ai")
+    ),
+    ZHIPU_GUEST("智谱免登录", null, emptyList()),
+    RAPHAEL_WEB(
+        "Raphael Web",
+        "https://raphael.app/zh",
+        listOf("https://raphael.app")
+    ),
+    OPENAI_COMPATIBLE("API 接口", null, emptyList());
+
+    val supportsWebLogin: Boolean get() = loginUrl != null
+}
+
+enum class ProviderCapability { CHAT, STREAMING, IMAGE_GENERATION }
+
+data class ProviderModel(
+    val publicModelId: String,
+    val displayName: String,
+    val providerType: WebProviderType,
+    val capabilities: Set<ProviderCapability>,
+    val enabled: Boolean = true,
+    val upstreamModelId: String = publicModelId,
+    val accountId: String? = null
+) {
+    val groupedLabel: String get() = "${providerType.displayName} · $displayName"
+    val supportsImageInput: Boolean get() {
+        if (providerType == WebProviderType.CHATGPT_WEB || providerType == WebProviderType.GEMINI_WEB) return true
+        if (providerType != WebProviderType.OPENAI_COMPATIBLE) return false
+        val id = "$upstreamModelId $displayName".lowercase()
+        return Regex("(^|[-_./ ])(vision|vlm?|llava|pixtral)([-_./ ]|$)").containsMatchIn(id) ||
+            Regex("gpt-4[o.]|gemini|claude-3|claude-sonnet|claude-opus|qwen[-_.]?vl").containsMatchIn(id)
+    }
+}
+
+data class WebAccountProfile(
+    val id: String,
+    val providerType: WebProviderType,
+    val displayName: String,
+    val enabled: Boolean = true
+)
+
+/**
+ * Single model authority for the relay UI and /v1/models.
+ * ChatGPT and Gemini use signed-in WebViews; Raphael Basic uses its public no-login WebView.
+ */
+object ProviderCatalog {
+    @Volatile private var runtimeModels: List<ProviderModel> = emptyList()
+    val models = listOf(
+        ProviderModel(
+            CnbClient.DEFAULT_MODEL,
+            "混元3",
+            WebProviderType.CNB,
+            setOf(ProviderCapability.CHAT, ProviderCapability.STREAMING)
+        ),
+        ProviderModel(
+            "doubao",
+            "豆包聊天",
+            WebProviderType.DOUBAO_WEB,
+            setOf(ProviderCapability.CHAT, ProviderCapability.STREAMING)
+        ),
+        ProviderModel(
+            "doubao-pro",
+            "豆包 Pro",
+            WebProviderType.DOUBAO_WEB,
+            setOf(ProviderCapability.CHAT, ProviderCapability.STREAMING)
+        ),
+        ProviderModel(
+            "doubao-image-web",
+            "豆包生图",
+            WebProviderType.DOUBAO_WEB,
+            setOf(ProviderCapability.IMAGE_GENERATION)
+        ),
+        ProviderModel(
+            "chatgpt-web",
+            "GPT 网页当前模型",
+            WebProviderType.CHATGPT_WEB,
+            setOf(ProviderCapability.CHAT, ProviderCapability.STREAMING),
+            enabled = true,
+            upstreamModelId = "gpt-web"
+        ),
+        ProviderModel(
+            "gpt-image-2",
+            "GPT Image 2（网页）",
+            WebProviderType.CHATGPT_WEB,
+            setOf(ProviderCapability.IMAGE_GENERATION),
+            enabled = true,
+            upstreamModelId = "gpt-image-2"
+        ),
+        ProviderModel(
+            "gemini-web",
+            "Gemini",
+            WebProviderType.GEMINI_WEB,
+            setOf(ProviderCapability.CHAT, ProviderCapability.STREAMING),
+            enabled = true
+        ),
+        ProviderModel(
+            "gemini-image-web",
+            "Gemini 生图",
+            WebProviderType.GEMINI_WEB,
+            setOf(ProviderCapability.IMAGE_GENERATION),
+            enabled = true
+        ),
+        ProviderModel(
+            "kimi-web",
+            "Kimi",
+            WebProviderType.KIMI_WEB,
+            setOf(ProviderCapability.CHAT, ProviderCapability.STREAMING),
+        ),
+        ProviderModel(
+            "deepseek-web",
+            "DeepSeek",
+            WebProviderType.DEEPSEEK_WEB,
+            setOf(ProviderCapability.CHAT, ProviderCapability.STREAMING),
+        ),
+        ProviderModel(
+            "deepseek-reasoner-web",
+            "DeepSeek 深度思考",
+            WebProviderType.DEEPSEEK_WEB,
+            setOf(ProviderCapability.CHAT, ProviderCapability.STREAMING),
+            upstreamModelId = "reasoner",
+        ),
+        ProviderModel(
+            "qwen-web",
+            "千问",
+            WebProviderType.QWEN_WEB,
+            setOf(ProviderCapability.CHAT, ProviderCapability.STREAMING),
+            upstreamModelId = QwenClient.DEFAULT_MODEL,
+        ),
+        ProviderModel(
+            "qwen-think-web",
+            "千问 深度思考",
+            WebProviderType.QWEN_WEB,
+            setOf(ProviderCapability.CHAT, ProviderCapability.STREAMING),
+            upstreamModelId = QwenClient.DEFAULT_MODEL,
+        ),
+        ProviderModel(
+            "zhipu-web",
+            "智谱免登录",
+            WebProviderType.ZHIPU_GUEST,
+            setOf(ProviderCapability.CHAT, ProviderCapability.STREAMING),
+        ),
+        ProviderModel(
+            "zhipu-plus-web",
+            "智谱增强模式",
+            WebProviderType.ZHIPU_GUEST,
+            setOf(ProviderCapability.CHAT, ProviderCapability.STREAMING),
+        ),
+        ProviderModel(
+            "zhipu-image-web",
+            "智谱免登录生图",
+            WebProviderType.ZHIPU_GUEST,
+            setOf(ProviderCapability.IMAGE_GENERATION),
+        ),
+        ProviderModel(
+            "qwen-ai-web",
+            "千问国际版 网页当前模型",
+            WebProviderType.QWEN_AI_WEB,
+            setOf(ProviderCapability.CHAT, ProviderCapability.STREAMING),
+        ),
+        ProviderModel(
+            "minimax-web",
+            "MiniMax 网页当前模型",
+            WebProviderType.MINIMAX_WEB,
+            setOf(ProviderCapability.CHAT, ProviderCapability.STREAMING),
+        ),
+        ProviderModel(
+            "mimo-web",
+            "小米 MiMo 网页当前模型",
+            WebProviderType.MIMO_WEB,
+            setOf(ProviderCapability.CHAT, ProviderCapability.STREAMING),
+        ),
+        ProviderModel(
+            "perplexity-web",
+            "Perplexity Auto",
+            WebProviderType.PERPLEXITY_WEB,
+            setOf(ProviderCapability.CHAT, ProviderCapability.STREAMING),
+        ),
+        ProviderModel(
+            "zai-web",
+            "Z.ai 网页当前模型",
+            WebProviderType.ZAI_WEB,
+            setOf(ProviderCapability.CHAT, ProviderCapability.STREAMING),
+        ),
+        ProviderModel(
+            "arena-guest-web",
+            "Arena Max 免登录",
+            WebProviderType.ARENA_GUEST,
+            setOf(ProviderCapability.CHAT, ProviderCapability.STREAMING),
+        ),
+        ProviderModel(
+            "raphael-image-web",
+            "Raphael 免费生图",
+            WebProviderType.RAPHAEL_WEB,
+            setOf(ProviderCapability.IMAGE_GENERATION),
+            enabled = true,
+            upstreamModelId = "raphael-basic"
+        )
+    )
+
+    val enabledModels: List<ProviderModel> get() =
+        models.filter { it.enabled } + runtimeModels.filter { it.enabled }
+    val chatModels: List<ProviderModel> get() = enabledModels.filter {
+        ProviderCapability.CHAT in it.capabilities
+    }
+    val imageModels: List<ProviderModel> get() = enabledModels.filter {
+        ProviderCapability.IMAGE_GENERATION in it.capabilities
+    }
+
+    fun find(publicModelId: String): ProviderModel? = enabledModels.firstOrNull {
+        it.publicModelId.equals(publicModelId, ignoreCase = true)
+    }
+
+    fun setRuntimeModels(models: List<ProviderModel>) {
+        runtimeModels = models.distinctBy { it.publicModelId }
+    }
+}
+
+object WebCookieSnapshot {
+    fun merge(headers: List<String>): String = headers
+        .flatMap { it.split(';') }
+        .map { it.trim() }
+        .filter { it.isNotBlank() && it.contains('=') }
+        .distinct()
+        .joinToString("; ")
+
+    fun chatGptAccessToken(sessionJson: String): String = runCatching {
+        Json.parseToJsonElement(sessionJson).jsonObject["accessToken"]?.jsonPrimitive?.contentOrNull.orEmpty()
+    }.getOrDefault("")
+
+    /** Visitor cookies are present before login, so they must not be accepted as a Doubao account. */
+    fun hasDoubaoLoginCookie(header: String): Boolean {
+        val names = header.split(';').mapNotNull { part ->
+            part.substringBefore('=', "").trim().lowercase().takeIf(String::isNotBlank)
+        }.toSet()
+        return names.any { it == "sessionid" || it == "sessionid_ss" || it == "sid_guard" }
+    }
+}

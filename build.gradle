@@ -1,0 +1,12 @@
+buildscript {
+    repositories { google(); mavenCentral(); gradlePluginPortal() }
+    dependencies {
+        classpath "org.jetbrains.kotlin:kotlin-gradle-plugin:2.3.10"
+        classpath "org.jetbrains.kotlin:compose-compiler-gradle-plugin:2.3.10"
+        classpath "org.jetbrains.kotlin:kotlin-serialization:2.3.10"
+    }
+}
+
+plugins {
+    id 'com.android.application' version '9.1.1' apply false
+}
