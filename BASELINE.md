@@ -1,7 +1,7 @@
-# 混元文为 Multiweb baseline
+# 混元太极 MultiWeb baseline
 
-- Author: 文蔚
-- Repository: https://cnb.cool/hunyuan-2026/hunyuan-wenwei-multiweb
+- Upstream branch: `feature/deepseek-proxy-android`
+- Pinned upstream commit: `8ee787d61d67c9379e7b8f1088301891ead1f13f`
 - Original application id: `com.github.jing332.deepseekproxy`
 - Original version: `1.0.3`
 

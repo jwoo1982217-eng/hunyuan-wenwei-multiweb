@@ -5,11 +5,11 @@ plugins {
 }
 
 android {
-    namespace 'com.github.jing332.deepseekproxy'
+    namespace 'com.wenwei.deepseekproxy'
     compileSdk 36
 
     defaultConfig {
-        applicationId 'com.github.jing332.deepseekproxy.multiweb'
+        applicationId 'com.wenwei.deepseekproxy.multiweb'
         minSdk 21
         targetSdk 35
         versionCode 7
@@ -19,9 +19,9 @@ android {
     buildFeatures { compose true }
     buildTypes {
         release {
-            minifyEnabled true
-            shrinkResources true
-            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+            minifyEnabled false
+            shrinkResources false
+            // 不用混淆（客户交付要求）
             // Keep the handoff APK directly installable and update-compatible with
             // the debug-signed builds used on the physical test device.
             signingConfig signingConfigs.debug

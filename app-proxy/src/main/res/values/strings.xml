@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">混元 Multiweb (文蔚)</string>
+    <string name="app_name">混元 MultiWeb</string>
     <string name="keep_alive_accessibility_label">混元后台保活</string>
     <string name="keep_alive_accessibility_description">仅用于保持本地网关和网页自动化进程存活；不读取、不记录、不操作屏幕内容。</string>
 </resources>
