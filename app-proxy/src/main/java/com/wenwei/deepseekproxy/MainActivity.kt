@@ -618,8 +618,24 @@ fun ProxyScreen(
     val providerOptions = chatModelItems.groupBy(::providerKey).map { (key, items) ->
         key to providerLabel(items)
     }
+    // 隐藏的内置供应商：与「浏览器」tab 共享同一份 hidden_web_providers 集合（key = WebProviderType.name）
+    val hiddenPrefs = remember { context.getSharedPreferences("hidden_web_providers", Context.MODE_PRIVATE) }
+    var hiddenProviders by remember {
+        mutableStateOf(hiddenPrefs.getStringSet("hidden", emptySet())?.toSet().orEmpty())
+    }
+    fun persistHidden(set: Set<String>) {
+        hiddenPrefs.edit().putStringSet("hidden", set).apply()
+    }
+    fun isHiddenProviderKey(key: String): Boolean =
+        key.startsWith("type:") && key.removePrefix("type:") in hiddenProviders
+    val hiddenWebProviders = remember(hiddenProviders) {
+        WebProviderType.entries.filter { it.name in hiddenProviders }
+    }
+    val visibleProviderOptions = providerOptions.filter { !isHiddenProviderKey(it.first) }
+    var pendingHideRelayProvider by remember { mutableStateOf<Triple<String, String, Boolean>?>(null) }
+    var hiddenMenu by remember { mutableStateOf(false) }
     val selectedProviderKey = chatModelItems.firstOrNull { it.publicModelId == model }
-        ?.let(::providerKey) ?: providerOptions.firstOrNull()?.first
+        ?.let(::providerKey) ?: visibleProviderOptions.firstOrNull()?.first
     val selectedProviderLabel = providerOptions.firstOrNull { it.first == selectedProviderKey }?.second.orEmpty()
     var modelExpanded by remember { mutableStateOf(false) }
     var providerExpanded by remember { mutableStateOf(false) }
@@ -872,11 +888,32 @@ fun ProxyScreen(
                         }
                     }
                     ExposedDropdownMenu(providerExpanded, { providerExpanded = false }) {
-                        providerOptions.forEach { (optionKey, providerLabel) ->
-                            DropdownMenuItem(text = { Text(providerLabel) }, onClick = {
-                                chatModelItems.firstOrNull { providerKey(it) == optionKey }?.publicModelId?.let(onModelChange)
-                                providerExpanded = false
-                            })
+                        visibleProviderOptions.forEach { (optionKey, providerLabel) ->
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .combinedClickable(
+                                        onClick = {
+                                            chatModelItems.firstOrNull { providerKey(it) == optionKey }?.publicModelId?.let(onModelChange)
+                                            providerExpanded = false
+                                        },
+                                        onLongClick = if (optionKey.startsWith("type:")) {
+                                            {
+                                                providerExpanded = false
+                                                pendingHideRelayProvider = Triple(optionKey, providerLabel, false)
+                                            }
+                                        } else null
+                                    )
+                                    .padding(horizontal = 16.dp, vertical = 12.dp)
+                            ) {
+                                Text(providerLabel)
+                            }
+                        }
+                        if (hiddenWebProviders.isNotEmpty()) {
+                            DropdownMenuItem(
+                                text = { Text("已隐藏的供应商（${hiddenWebProviders.size}）") },
+                                onClick = { providerExpanded = false; hiddenMenu = true }
+                            )
                         }
                     }
                 }
@@ -892,8 +929,9 @@ fun ProxyScreen(
             val imageProviderOptions = imageModels.groupBy(::providerKey).map { (key, items) ->
                 key to providerLabel(items)
             }
+            val visibleImageProviderOptions = imageProviderOptions.filter { !isHiddenProviderKey(it.first) }
             val selectedImageProviderKey = imageModels.firstOrNull { it.publicModelId == imageModelFlow }
-                ?.let(::providerKey) ?: imageProviderOptions.firstOrNull()?.first
+                ?.let(::providerKey) ?: visibleImageProviderOptions.firstOrNull()?.first
             val selectedImageProviderLabel = imageProviderOptions
                 .firstOrNull { it.first == selectedImageProviderKey }?.second.orEmpty()
             val selectedProviderImageModels = imageModels.filter { providerKey(it) == selectedImageProviderKey }
@@ -928,14 +966,35 @@ fun ProxyScreen(
                     }
                 }
                 ExposedDropdownMenu(imageProviderExpanded, { imageProviderExpanded = false }) {
-                    imageProviderOptions.forEach { (optionKey, label) ->
-                        DropdownMenuItem(text = { Text(label) }, onClick = {
-                            imageModels.firstOrNull { providerKey(it) == optionKey }?.publicModelId?.let {
-                                vm.setImageModel(it)
-                                onBrowserModelRequested(it)
-                            }
-                            imageProviderExpanded = false
-                        })
+                    visibleImageProviderOptions.forEach { (optionKey, label) ->
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .combinedClickable(
+                                    onClick = {
+                                        imageModels.firstOrNull { providerKey(it) == optionKey }?.publicModelId?.let {
+                                            vm.setImageModel(it)
+                                            onBrowserModelRequested(it)
+                                        }
+                                        imageProviderExpanded = false
+                                    },
+                                    onLongClick = if (optionKey.startsWith("type:")) {
+                                        {
+                                            imageProviderExpanded = false
+                                            pendingHideRelayProvider = Triple(optionKey, label, true)
+                                        }
+                                    } else null
+                                )
+                                .padding(horizontal = 16.dp, vertical = 12.dp)
+                        ) {
+                            Text(label)
+                        }
+                    }
+                    if (hiddenWebProviders.isNotEmpty()) {
+                        DropdownMenuItem(
+                            text = { Text("已隐藏的供应商（${hiddenWebProviders.size}）") },
+                            onClick = { imageProviderExpanded = false; hiddenMenu = true }
+                        )
                     }
                 }
             }
@@ -1012,6 +1071,64 @@ fun ProxyScreen(
                     }
                 }
             }
+        }
+        pendingHideRelayProvider?.let { (hideKey, hideLabel, isImage) ->
+            AlertDialog(
+                onDismissRequest = { pendingHideRelayProvider = null },
+                title = { Text("隐藏供应商") },
+                text = { Text("确定要隐藏「$hideLabel」吗？隐藏后可在「已隐藏的供应商」中恢复。") },
+                confirmButton = {
+                    TextButton(onClick = {
+                        val newSet = hiddenProviders + hideKey.removePrefix("type:")
+                        hiddenProviders = newSet
+                        persistHidden(newSet)
+                        // 隐藏的是当前选中供应商时，回退到第一个可见供应商，避免「幽灵选中」
+                        if (isImage) {
+                            val imgModels = com.wenwei.deepseekproxy.proxy.ProviderCatalog.imageModels
+                            val curKey = imgModels.firstOrNull { it.publicModelId == imageModelFlow }?.let(::providerKey)
+                            if (curKey == hideKey) {
+                                imgModels.firstOrNull { providerKey(it) != hideKey && !isHiddenProviderKey(providerKey(it)) }?.publicModelId?.let {
+                                    vm.setImageModel(it)
+                                    onBrowserModelRequested(it)
+                                }
+                            }
+                        } else if (selectedProviderKey == hideKey) {
+                            providerOptions.firstOrNull { it.first != hideKey && !isHiddenProviderKey(it.first) }?.first?.let { k ->
+                                chatModelItems.firstOrNull { providerKey(it) == k }?.publicModelId?.let(onModelChange)
+                            }
+                        }
+                        pendingHideRelayProvider = null
+                    }) { Text("隐藏") }
+                },
+                dismissButton = {
+                    TextButton(onClick = { pendingHideRelayProvider = null }) { Text("取消") }
+                }
+            )
+        }
+        if (hiddenMenu) {
+            AlertDialog(
+                onDismissRequest = { hiddenMenu = false },
+                title = { Text("已隐藏的供应商") },
+                text = {
+                    Column {
+                        if (hiddenWebProviders.isEmpty()) {
+                            Text("暂无隐藏的供应商", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        hiddenWebProviders.forEach { item ->
+                            TextButton(
+                                modifier = Modifier.fillMaxWidth(),
+                                onClick = {
+                                    val newSet = hiddenProviders - item.name
+                                    hiddenProviders = newSet
+                                    persistHidden(newSet)
+                                    hiddenMenu = false
+                                }
+                            ) { Text(item.displayName) }
+                        }
+                    }
+                },
+                confirmButton = { TextButton(onClick = { hiddenMenu = false }) { Text("关闭") } }
+            )
         }
         Spacer(Modifier.height(3.dp))
 
