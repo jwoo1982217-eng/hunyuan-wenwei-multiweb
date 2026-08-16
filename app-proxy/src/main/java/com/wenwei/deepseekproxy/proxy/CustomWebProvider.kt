@@ -212,6 +212,50 @@ object CustomWebChatAutomation {
     fun detach(view: WebView) { if (attached?.first === view) attached = null }
     fun attachedConfigId(): String? = attached?.second
 
+    /**
+     * 常驻拦截"暂无权限访问"类 Vant toast：LongCat 等网页加载时会因非关键
+     * 接口（会员/权限检查）返回无权限而弹 toast，但聊天主体正常可用。
+     * 页面加载完成后注入 MutationObserver（300ms 防抖），任何时刻新出现的
+     * 匹配 toast 都会被自动移除，避免切到供应商页面时闪出弹窗。
+     * 幂等：同页重复调用不会重复注入（window.__multiwebPermBlocker 标记）。
+     */
+    fun armPermissionToastBlocker(view: WebView) {
+        if (!view.isAttachedToWindow) return
+        main.post {
+            view.evaluateJavascript(
+                """
+                (()=>{try{
+                  if(window.__multiwebPermBlocker)return 'dup';
+                  let timer=null;
+                  const RE=/暂无权限|没有权限|无权限|无权访问|访问受限|权限不足/;
+                  const clean=()=>{timer=null;
+                    const nodes=[...document.querySelectorAll(
+                      '[class*="van-toast"],[class*="van-notify"],[class*="van-dialog"],[class*="toast"],[class*="popup"],[role="dialog"]'
+                    )];
+                    for(const e of nodes){
+                      const t=(e.innerText||e.textContent||'').trim();
+                      if(t.length>0&&t.length<80&&RE.test(t)){
+                        e.style.display='none';
+                        // 同批移除无子节点的遮罩层，避免留黑底
+                        const mask=document.querySelector('.van-overlay,[class*="overlay"]');
+                        if(mask&&!mask.childElementCount)mask.remove();
+                        e.remove();
+                      }
+                    }
+                  };
+                  const schedule=()=>{if(!timer)timer=setTimeout(clean,300)};
+                  clean();
+                  const mo=new MutationObserver(schedule);
+                  mo.observe(document.documentElement||document.body,{childList:true,subtree:true});
+                  window.__multiwebPermBlocker=mo;
+                  return 'armed';
+                }catch(e){return String(e)}})()
+                """.trimIndent(),
+                null,
+            )
+        }
+    }
+
     suspend fun chat(config: CustomWebProviderConfig, messages: List<ChatMessage>, onUpdate: suspend (String) -> Unit): String = lock.withLock {
         val (view, _) = awaitAttached(config)
         checkArenaGuestBlocker(view, config)

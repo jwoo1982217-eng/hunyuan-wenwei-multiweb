@@ -2034,12 +2034,15 @@ fun BrowserScreen(
                                 }?.let {
                                     com.wenwei.deepseekproxy.proxy.CustomWebChatAutomation.attach(view, it.id)
                                     com.wenwei.deepseekproxy.proxy.CustomWebImageAutomation.attach(view, it.id)
+                                    // 常驻拦截"暂无权限访问"类 toast（LongCat 等网页加载时闪出）
+                                    com.wenwei.deepseekproxy.proxy.CustomWebChatAutomation.armPermissionToastBlocker(view)
                                     currentRelayReadyCallback()
                                 }
                             }
                             if (view != null && com.wenwei.deepseekproxy.proxy.isBuiltInBrowserRelay(currentBrowserProvider)) {
                                 val config = com.wenwei.deepseekproxy.proxy.builtInBrowserRelayConfig(currentBrowserProvider)
                                 com.wenwei.deepseekproxy.proxy.CustomWebChatAutomation.attach(view, config.id)
+                                com.wenwei.deepseekproxy.proxy.CustomWebChatAutomation.armPermissionToastBlocker(view)
                             }
                         }
 
