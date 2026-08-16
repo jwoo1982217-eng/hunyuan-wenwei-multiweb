@@ -65,22 +65,38 @@ import com.wenwei.deepseekproxy.proxy.BrowserRelayActivation
 import com.wenwei.deepseekproxy.proxy.isKnownCustomWebImagePage
 import com.wenwei.deepseekproxy.proxy.customWebImageModelId
 import android.graphics.BitmapFactory
+import android.graphics.Bitmap
+import android.content.ContentValues
+import android.os.Environment
+import android.provider.MediaStore
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
+import kotlin.coroutines.resume
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.ByteArrayOutputStream
+import java.io.File
 import java.util.concurrent.atomic.AtomicReference
 
-private class WebSessionJsBridge(private val callback: (String) -> Unit) {
+private class WebSessionJsBridge(
+    private val callback: (String) -> Unit,
+    private val onSaveImageUrl: (String) -> Unit = {},
+) {
     @JavascriptInterface
     fun onChatGptSession(sessionJson: String) {
         Handler(Looper.getMainLooper()).post { callback(sessionJson) }
     }
-}
 
+    @JavascriptInterface
+    fun onSaveImage(imageUrl: String) {
+        if (imageUrl.isBlank()) return
+        Handler(Looper.getMainLooper()).post { onSaveImageUrl(imageUrl) }
+    }
+}
 private fun webLoginUserAgent(
     context: Context,
     provider: WebProviderType,
@@ -370,9 +386,8 @@ fun App(vm: ProxyViewModel) {
                                 vm.sendRoundtable(payload, models, attachments)
                                 input = ""
                             },
-                            onGenerate = { payload ->
-                                vm.chatInput.value = payload
-                                vm.generateImage()
+                            onGenerate = { payload, attachments ->
+                                vm.generateImage(payload, attachments)
                                 input = ""
                             },
                             modifier = Modifier.fillMaxSize().padding(horizontal = 10.dp, vertical = 6.dp)
@@ -569,7 +584,7 @@ fun ProxyScreen(
     onSavePort: () -> Unit,
     onSend: (String, List<Uri>) -> Unit,
     onRoundtable: (String, List<String>, List<Uri>) -> Unit,
-    onGenerate: (String) -> Unit,
+    onGenerate: (String, List<Uri>) -> Unit,
     modifier: Modifier = Modifier
 ) {
     val portFlow by vm.port.collectAsState()
@@ -1074,15 +1089,14 @@ fun ProxyScreen(
                             return
                         }
                     }
-                    if (imageMode) onGenerate(payload)
+                    if (imageMode) onGenerate(payload, pendingAttachments)
                     else if (roundtableMode && roundtableModels.size >= 2) onRoundtable(payload, roundtableModels, pendingAttachments)
                     else onSend(payload, pendingAttachments)
                     pendingAttachments = emptyList()
                 }
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     FilledTonalIconButton(
-                        onClick = { attachmentLauncher.launch(arrayOf("image/*", "text/*", "application/pdf")) },
-                        enabled = !imageMode
+                        onClick = { attachmentLauncher.launch(arrayOf("image/*", "text/*", "application/pdf")) }
                     ) { Text("＋", fontSize = 22.sp) }
                     BasicTextField(
                         value = input,
@@ -1226,19 +1240,60 @@ fun CookiePickerDialog(
 fun UrlImage(url: String, modifier: Modifier = Modifier) {
     val context = LocalContext.current
     val viewRef = remember { mutableStateOf<ImageView?>(null) }
+    val scope = rememberCoroutineScope()
     AndroidView(
         factory = { ctx ->
             ImageView(ctx).apply {
                 scaleType = ImageView.ScaleType.FIT_CENTER
                 adjustViewBounds = true
+                setOnLongClickListener {
+                    scope.launch {
+                        val bytes = fetchImageBytes(context, url)
+                        if (bytes != null) {
+                            val ok = saveImageToGallery(context, bytes)
+                            Toast.makeText(context, if (ok) "已保存到相册" else "保存失败", Toast.LENGTH_SHORT).show()
+                        } else {
+                            Toast.makeText(context, "图片获取失败", Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                    true
+                }
             }.also { viewRef.value = it }
         },
         modifier = modifier
     )
     LaunchedEffect(url) {
         val iv = viewRef.value ?: return@LaunchedEffect
-        // Web-generated image URLs can be session-scoped even when they look public.
-        // Reuse only the cookies CookieManager associates with the image's own domain.
+        withContext(Dispatchers.IO) {
+            val bytes = fetchImageBytes(context, url) ?: return@withContext
+            val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+            if (bmp != null) withContext(Dispatchers.Main) {
+                iv.setImageBitmap(bmp)
+                iv.requestLayout()
+            }
+        }
+    }
+}
+
+/** 获取图片原始字节（data:image / content:// / http 三种来源，含会话 Cookie 与本地网关鉴权）。 */
+private suspend fun fetchImageBytes(context: Context, url: String): ByteArray? = withContext(Dispatchers.IO) {
+    try {
+        if (url.startsWith("data:image/")) {
+            val comma = url.indexOf(',')
+            if (comma > 0) {
+                return@withContext android.util.Base64.decode(
+                    url.substring(comma + 1),
+                    android.util.Base64.DEFAULT,
+                )
+            }
+            return@withContext null
+        }
+        if (url.startsWith("content://")) {
+            context.contentResolver.openInputStream(Uri.parse(url))?.use { input ->
+                return@withContext input.readBytes()
+            }
+            return@withContext null
+        }
         val cookieHeader = runCatching {
             CookieManager.getInstance().getCookie(url).orEmpty()
         }.getOrDefault("")
@@ -1248,65 +1303,263 @@ fun UrlImage(url: String, modifier: Modifier = Modifier) {
                 else "${uri.scheme}://${uri.host}/"
             }
         }.getOrDefault("")
-        withContext(Dispatchers.IO) {
-            try {
-                if (url.startsWith("data:image/")) {
-                    val comma = url.indexOf(',')
-                    if (comma > 0) {
-                        val bytes = android.util.Base64.decode(
-                            url.substring(comma + 1),
-                            android.util.Base64.DEFAULT,
-                        )
-                        val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
-                        if (bmp != null) withContext(Dispatchers.Main) {
-                            iv.setImageBitmap(bmp)
-                            iv.requestLayout()
-                        }
-                    }
-                    return@withContext
-                }
-                if (url.startsWith("content://")) {
-                    context.contentResolver.openInputStream(Uri.parse(url))?.use { input ->
-                        val bytes = input.readBytes()
-                        val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
-                        if (bmp != null) withContext(Dispatchers.Main) {
-                            iv.setImageBitmap(bmp)
-                            iv.requestLayout()
-                        }
-                    }
-                    return@withContext
-                }
-                val client = OkHttpClient()
-                val request = Request.Builder().url(url).apply {
-                    val localPort = context.getSharedPreferences("ds_proxy", Context.MODE_PRIVATE)
-                        .getInt("port", 8800)
-                    if (LocalGatewaySecurity.shouldAuthorizeGeneratedImage(url, localPort)) {
-                        header("Authorization", "Bearer ${LocalGatewayTokenStore(context).getOrCreate()}")
-                    }
-                    if (cookieHeader.isNotBlank()) header("Cookie", cookieHeader)
-                    header(
-                        "User-Agent",
-                        "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/120 Mobile Safari/537.36"
-                    )
-                    if (imageReferer.isNotBlank()) header("Referer", imageReferer)
-                }.build()
-                client.newCall(request).execute().use { resp ->
-                    if (resp.isSuccessful) {
-                        resp.body?.bytes()?.let { bytes ->
-                            val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
-                            if (bmp != null) withContext(Dispatchers.Main) {
-                                iv.setImageBitmap(bmp)
-                                iv.requestLayout()
-                            }
-                        }
-                    } else {
-                        LogStore.w("Image", "图片加载失败 HTTP ${resp.code}，域名=${request.url.host}")
-                    }
-                }
-            } catch (e: Exception) {
-                LogStore.w("Image", "图片加载异常：${e.localizedMessage ?: e.javaClass.simpleName}")
+        val client = OkHttpClient()
+        val request = Request.Builder().url(url).apply {
+            val localPort = context.getSharedPreferences("ds_proxy", Context.MODE_PRIVATE)
+                .getInt("port", 8800)
+            if (LocalGatewaySecurity.shouldAuthorizeGeneratedImage(url, localPort)) {
+                header("Authorization", "Bearer ${LocalGatewayTokenStore(context).getOrCreate()}")
+            }
+            if (cookieHeader.isNotBlank()) header("Cookie", cookieHeader)
+            header(
+                "User-Agent",
+                "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/120 Mobile Safari/537.36"
+            )
+            if (imageReferer.isNotBlank()) header("Referer", imageReferer)
+        }.build()
+        client.newCall(request).execute().use { resp ->
+            if (resp.isSuccessful) resp.body?.bytes() else {
+                LogStore.w("Image", "图片加载失败 HTTP ${resp.code}，域名=${request.url.host}")
+                null
             }
         }
+    } catch (e: Exception) {
+        LogStore.w("Image", "图片加载异常：${e.localizedMessage ?: e.javaClass.simpleName}")
+        null
+    }
+}
+
+/**
+ * 长按网页图片保存：先 OkHttp 直下（带豆包 Referer 防盗链头）；
+ * 直下失败（签名 URL 已失效）则从 WebView 磁盘缓存（Chromium Simple Cache）提取字节。
+ */
+private suspend fun fetchWebViewImageBytes(context: Context, url: String): ByteArray? = withContext(Dispatchers.IO) {
+    if (url.startsWith("data:image/")) {
+        val comma = url.indexOf(',')
+        if (comma > 0) {
+            return@withContext android.util.Base64.decode(url.substring(comma + 1), android.util.Base64.DEFAULT)
+        }
+        return@withContext null
+    }
+    // 1) 直下：带豆包 Referer + Cookie（byteimg 防盗链校验 Referer=doubao.com）
+    runCatching {
+        val cookieHeader = runCatching {
+            CookieManager.getInstance().getCookie(url).orEmpty()
+        }.getOrDefault("")
+        val client = OkHttpClient()
+        val request = Request.Builder().url(url)
+            .header("User-Agent", webLoginUserAgent(context, WebProviderType.DOUBAO_WEB, false))
+            .header("Referer", "https://www.doubao.com/")
+            .apply {
+                if (cookieHeader.isNotBlank()) header("Cookie", cookieHeader)
+            }
+            .build()
+        client.newCall(request).execute().use { resp ->
+            if (resp.isSuccessful) resp.body?.bytes() else null
+        }
+    }.getOrNull()?.let { bytes ->
+        if (isImageBytes(bytes) || isVideoBytes(bytes)) return@withContext bytes
+    }
+    // 2) 从 WebView 缓存提取
+    extractImageFromWebViewCache(context, url)
+}
+
+/** 判断字节是否可解码为图片（JPEG/PNG/WebP/GIF 魔数或 BitmapFactory 可解）。 */
+private fun isImageBytes(bytes: ByteArray): Boolean {
+    if (bytes.size < 16) return false
+    val h = bytes
+    if (h[0] == 0xFF.toByte() && h[1] == 0xD8.toByte() && h[2] == 0xFF.toByte()) return true // JPEG
+    if (h[0] == 0x89.toByte() && h[1] == 0x50.toByte() && h[2] == 0x4E.toByte() && h[3] == 0x47.toByte()) return true // PNG
+    if (h[0] == 0x52.toByte() && h[1] == 0x49.toByte() && h[2] == 0x46.toByte() && h[3] == 0x46.toByte()) { // RIFF(WebP)
+        if (bytes.size > 12 && h[8] == 0x57.toByte() && h[9] == 0x45.toByte() && h[10] == 0x42.toByte() && h[11] == 0x50.toByte()) return true
+    }
+    return runCatching {
+        val opts = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)
+        opts.outWidth > 0 && opts.outHeight > 0
+    }.getOrDefault(false)
+}
+
+private fun indexOfBytes(haystack: ByteArray, needle: ByteArray, from: Int = 0): Int {
+    if (needle.isEmpty() || haystack.size < needle.size) return -1
+    outer@ for (i in from..haystack.size - needle.size) {
+        for (j in needle.indices) {
+            if (haystack[i + j] != needle[j]) continue@outer
+        }
+        return i
+    }
+    return -1
+}
+
+/**
+ * 从 WebView Chromium Simple Cache 提取图片字节。
+ * 缓存目录：<cacheDir>/WebView/Default/HTTP Cache/Cache_Data/<hash>_0
+ * 文件格式：header（含明文 URL） + body（"data:" 前缀后是图片字节）。
+ * 策略：按 URL 匹配缓存文件 → 找 JPEG/PNG/WebP 魔数 → 截取到文件尾尝试解码。
+ */
+private fun extractImageFromWebViewCache(context: Context, url: String): ByteArray? {
+    val cacheDir = File(context.cacheDir, "WebView/Default/HTTP Cache/Cache_Data")
+    val files = cacheDir.listFiles { f -> f.isFile && f.name.endsWith("_0") } ?: return null
+    // 优先匹配完整 URL（含 query），退而匹配 path 部分（query 可能被缓存键规范化）
+    val urlPath = runCatching { Uri.parse(url).path ?: "" }.getOrDefault("")
+    for (f in files) {
+        val bytes = runCatching { f.readBytes() }.getOrNull() ?: continue
+        if (bytes.size < 64) continue
+        // header 是文本，取前 64KB 匹配 URL
+        val headerLen = minOf(bytes.size, 65536)
+        val header = String(bytes, 0, headerLen, Charsets.ISO_8859_1)
+        val matched = header.contains(url) || (urlPath.isNotEmpty() && header.contains(urlPath))
+        if (!matched) continue
+        val img = extractImageBytes(bytes) ?: continue
+        if (isImageBytes(img)) return img
+    }
+    return null
+}
+
+/** 在 Simple Cache body 里定位图片字节：找 JPEG/PNG/WebP 魔数，从魔数截到文件尾。 */
+private fun extractImageBytes(bytes: ByteArray): ByteArray? {
+    // JPEG: FF D8 FF
+    val jpeg = indexOfBytes(bytes, byteArrayOf(0xFF.toByte(), 0xD8.toByte(), 0xFF.toByte()))
+    if (jpeg >= 0) {
+        val img = bytes.copyOfRange(jpeg, bytes.size)
+        // body 尾部可能有 Chromium 附加数据，先试整段；失败则逐段截断重试
+        if (isImageBytes(img)) return img
+        for (trim in intArrayOf(16, 64, 256, 1024)) {
+            if (bytes.size - jpeg > trim) {
+                val t = bytes.copyOfRange(jpeg, bytes.size - trim)
+                if (isImageBytes(t)) return t
+            }
+        }
+    }
+    // PNG: 89 50 4E 47
+    val png = indexOfBytes(bytes, byteArrayOf(0x89.toByte(), 0x50, 0x4E, 0x47))
+    if (png >= 0) {
+        val img = bytes.copyOfRange(png, bytes.size)
+        if (isImageBytes(img)) return img
+    }
+    // WebP: RIFF....WEBP
+    val riff = indexOfBytes(bytes, byteArrayOf(0x52, 0x49, 0x46, 0x46))
+    if (riff >= 0 && bytes.size > riff + 12 &&
+        bytes[riff + 8] == 0x57.toByte() && bytes[riff + 9] == 0x45.toByte() && bytes[riff + 10] == 0x42.toByte() && bytes[riff + 11] == 0x50.toByte()
+    ) {
+        val img = bytes.copyOfRange(riff, bytes.size)
+        if (isImageBytes(img)) return img
+    }
+    return null
+}
+
+/** 在 WebView 主线程执行 JS 并取回结果（evaluateJavascript 返回 JSON 编码字符串）。 */
+private suspend fun evalJs(webView: WebView, js: String): String? = suspendCancellableCoroutine { cont ->
+    webView.post {
+        try {
+            webView.evaluateJavascript(js) { value ->
+                if (cont.isActive) cont.resume(value)
+            }
+        } catch (e: Exception) {
+            if (cont.isActive) cont.resume(null)
+        }
+    }
+}
+
+/**
+ * 读取 blob: URL 的图片字节（豆包等站点下载按钮常生成 blob URL）。
+ * 通过页面内 fetch + FileReader 转 base64，轮询 window.__dlb64 取回。
+ */
+private suspend fun fetchBlobBytes(webView: WebView, blobUrl: String): ByteArray? {
+    val js = "fetch('$blobUrl').then(r=>r.blob()).then(b=>{const fr=new FileReader();" +
+        "fr.onloadend=()=>{window.__dlb64=fr.result.split(',')[1]};fr.readAsDataURL(b)})" +
+        ".catch(()=>{window.__dlb64='__ERR__'})"
+    evalJs(webView, js)
+    for (i in 0 until 120) { // 最多等 12 秒
+        kotlinx.coroutines.delay(100)
+        val v = evalJs(webView, "window.__dlb64 || ''") ?: continue
+        val cleaned = v.trim().removeSurrounding("\"")
+        if (cleaned == "__ERR__" || cleaned == "undefined" || cleaned.isEmpty()) continue
+        if (cleaned.length > 16) {
+            return runCatching {
+                android.util.Base64.decode(cleaned, android.util.Base64.DEFAULT)
+            }.getOrNull()?.takeIf { isImageBytes(it) || isVideoBytes(it) }
+        }
+    }
+    return null
+}
+
+/** 判断字节是否为视频（MP4/MOV/WebM 等容器魔数）。 */
+private fun isVideoBytes(bytes: ByteArray): Boolean {
+    if (bytes.size < 16) return false
+    // MP4/MOV: 前 4 字节是 box 大小，4-8 字节是 "ftyp"
+    if (bytes[4] == 0x66.toByte() && bytes[5] == 0x74.toByte() && bytes[6] == 0x79.toByte() && bytes[7] == 0x70.toByte()) return true
+    // WebM/MKV: EBML 头 1A 45 DF A3
+    if (bytes[0] == 0x1A.toByte() && bytes[1] == 0x45.toByte() && bytes[2] == 0xDF.toByte() && bytes[3] == 0xA3.toByte()) return true
+    return false
+}
+
+/** 保存视频到系统相册（MediaStore.Video，Android 10+ 无需存储权限）。 */
+private fun saveVideoToGallery(context: Context, bytes: ByteArray): Boolean {
+    return try {
+        val name = "MultiWeb_${System.currentTimeMillis()}.mp4"
+        val values = ContentValues().apply {
+            put(MediaStore.Video.Media.DISPLAY_NAME, name)
+            put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                put(MediaStore.Video.Media.RELATIVE_PATH, Environment.DIRECTORY_MOVIES + "/MultiWeb")
+                put(MediaStore.Video.Media.IS_PENDING, 1)
+            }
+        }
+        val resolver = context.contentResolver
+        val uri = resolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, values) ?: return false
+        try {
+            resolver.openOutputStream(uri)?.use { it.write(bytes) } ?: return false
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                values.clear()
+                values.put(MediaStore.Video.Media.IS_PENDING, 0)
+                resolver.update(uri, values, null, null)
+            }
+            true
+        } catch (e: Exception) {
+            resolver.delete(uri, null, null)
+            false
+        }
+    } catch (e: Exception) {
+        LogStore.w("Image", "保存视频异常：${e.localizedMessage ?: e.javaClass.simpleName}")
+        false
+    }
+}
+
+/** 保存图片到系统相册（MediaStore，Android 10+ 无需存储权限）。 */
+private fun saveImageToGallery(context: Context, bytes: ByteArray): Boolean {
+    return try {
+        // 统一重编码为 PNG 存，避免 MIME 判断与透明通道丢失
+        val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: return false
+        val out = ByteArrayOutputStream()
+        bmp.compress(Bitmap.CompressFormat.PNG, 100, out)
+        val pngBytes = out.toByteArray()
+        val name = "MultiWeb_${System.currentTimeMillis()}.png"
+        val values = ContentValues().apply {
+            put(MediaStore.Images.Media.DISPLAY_NAME, name)
+            put(MediaStore.Images.Media.MIME_TYPE, "image/png")
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                put(MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/MultiWeb")
+                put(MediaStore.Images.Media.IS_PENDING, 1)
+            }
+        }
+        val resolver = context.contentResolver
+        val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values) ?: return false
+        try {
+            resolver.openOutputStream(uri)?.use { it.write(pngBytes) } ?: return false
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                values.clear()
+                values.put(MediaStore.Images.Media.IS_PENDING, 0)
+                resolver.update(uri, values, null, null)
+            }
+            true
+        } catch (e: Exception) {
+            resolver.delete(uri, null, null)
+            false
+        }
+    } catch (e: Exception) {
+        LogStore.w("Image", "保存图片异常：${e.localizedMessage ?: e.javaClass.simpleName}")
+        false
     }
 }
 
@@ -1393,6 +1646,7 @@ fun BrowserScreen(
 ) {
     val context = LocalContext.current
     val webViewRef = remember { mutableStateOf<WebView?>(null) }
+    val browserScope = rememberCoroutineScope()
     // 隐藏的内置供应商（可恢复）
     val hiddenPrefs = remember { context.getSharedPreferences("hidden_web_providers", Context.MODE_PRIVATE) }
     var hiddenProviders by remember {
@@ -1449,22 +1703,38 @@ fun BrowserScreen(
     val providerLabel = activeCustom?.name ?: provider.displayName
     val providerLoginUrl = activeCustom?.loginUrl ?: provider.loginUrl.orEmpty()
     val jsBridge = remember {
-        WebSessionJsBridge { sessionJson ->
-            val accessToken = WebCookieSnapshot.chatGptAccessToken(sessionJson)
-            if (accessToken.isBlank()) {
-                toast = "ChatGPT 登录存在，但会话响应没有 accessToken"
-            } else {
-                currentSaveCallback(
-                    WebProviderType.CHATGPT_WEB,
-                    pendingAccountName,
-                    pendingCookie,
-                    accessToken,
-                    emptyMap(),
-                )
-                toast = "已保存并验证 ChatGPT 登录会话"
-            }
-            pendingCookie = ""
-        }
+        WebSessionJsBridge(
+            callback = { sessionJson ->
+                val accessToken = WebCookieSnapshot.chatGptAccessToken(sessionJson)
+                if (accessToken.isBlank()) {
+                    toast = "ChatGPT 登录存在，但会话响应没有 accessToken"
+                } else {
+                    currentSaveCallback(
+                        WebProviderType.CHATGPT_WEB,
+                        pendingAccountName,
+                        pendingCookie,
+                        accessToken,
+                        emptyMap(),
+                    )
+                    toast = "已保存并验证 ChatGPT 登录会话"
+                }
+                pendingCookie = ""
+            },
+            onSaveImageUrl = { imageUrl ->
+                browserScope.launch {
+                    toast = "正在保存原图…"
+                    val bytes = fetchWebViewImageBytes(context, imageUrl)
+                    if (bytes != null) {
+                        val ok = saveImageToGallery(context, bytes)
+                        toast = if (ok) "原图已保存到相册" else "图片保存失败"
+                        LogStore.i("WebDownload", "onSaveImage 保存结果 ok=$ok size=${bytes.size}")
+                    } else {
+                        LogStore.w("WebDownload", "onSaveImage 下载失败 $imageUrl")
+                        toast = "原图下载失败（链接失效）"
+                    }
+                }
+            },
+        )
     }
 
     val retainedWebView = webViewRef.value
@@ -1929,6 +2199,65 @@ fun BrowserScreen(
                     settings.displayZoomControls = false
                     settings.mixedContentMode =
                         android.webkit.WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
+                    // 长按网页图片 → 保存到相册（先 OkHttp 直下，失效则从 WebView 缓存提取字节）
+                    setOnLongClickListener {
+                        val ht = hitTestResult
+                        val isImage = ht != null && (
+                            ht.type == android.webkit.WebView.HitTestResult.IMAGE_TYPE ||
+                                ht.type == android.webkit.WebView.HitTestResult.SRC_IMAGE_ANCHOR_TYPE
+                            ) && !ht.extra.isNullOrBlank()
+                        if (isImage) {
+                            val imgUrl = ht.extra!!
+                            browserScope.launch {
+                                toast = "正在保存图片…"
+                                val bytes = fetchWebViewImageBytes(context, imgUrl)
+                                if (bytes != null) {
+                                    val ok = saveImageToGallery(context, bytes)
+                                    toast = if (ok) "已保存到相册" else "图片保存失败"
+                                } else {
+                                    toast = "图片链接已失效，且本地无缓存，请重新生成后保存"
+                                }
+                            }
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                    // 捕获网页内下载（豆包「下载」按钮触发 a[download]/blob 下载）→ 保存到相册
+                    setDownloadListener { url, _ /* userAgent */, contentDisposition, mimetype, _ /* contentLength */ ->
+                        if (!url.isNullOrBlank()) {
+                            LogStore.i("WebDownload", "捕获下载 URL=${url.take(140)} mime=$mimetype")
+                            browserScope.launch {
+                                // 视频：mp4/mov/webm 等 → 存相册视频目录；其余按图片处理
+                                val isVideo = (mimetype?.startsWith("video/") == true) ||
+                                    url.endsWith(".mp4") || url.endsWith(".mov") ||
+                                    url.endsWith(".webm") || url.endsWith(".mkv") ||
+                                    (contentDisposition?.contains("mp4", ignoreCase = true) == true)
+                                toast = if (isVideo) "正在保存视频…" else "正在保存图片…"
+                                val bytes = if (url.startsWith("blob:")) {
+                                    fetchBlobBytes(this@apply, url)
+                                } else {
+                                    fetchWebViewImageBytes(context, url)
+                                }
+                                if (bytes != null) {
+                                    val ok = if (isVideo || isVideoBytes(bytes)) {
+                                        saveVideoToGallery(context, bytes)
+                                    } else {
+                                        saveImageToGallery(context, bytes)
+                                    }
+                                    toast = when {
+                                        ok && isVideo -> "视频已保存到相册"
+                                        ok -> "已保存到相册"
+                                        else -> "保存失败"
+                                    }
+                                    LogStore.i("WebDownload", "保存结果 ok=$ok size=${bytes.size} isVideo=$isVideo")
+                                } else {
+                                    LogStore.w("WebDownload", "下载失败 URL=${url.take(140)}")
+                                    toast = "下载失败（链接失效）"
+                                }
+                            }
+                        }
+                    }
                     webViewClient = object : WebViewClient() {
                         override fun shouldInterceptRequest(
                             view: WebView?,

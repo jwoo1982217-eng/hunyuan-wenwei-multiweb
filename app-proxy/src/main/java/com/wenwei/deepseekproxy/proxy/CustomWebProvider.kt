@@ -14,7 +14,10 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonArray
+import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.put
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONArray
@@ -1024,13 +1027,13 @@ object CustomWebImageAutomation {
     fun detach(view: WebView) { if (attached?.first === view) attached = null }
     fun attachedConfigId(): String? = attached?.second
 
-    suspend fun generateImage(config: CustomWebProviderConfig, prompt: String, ratio: String?): List<String> = lock.withLock {
+    suspend fun generateImage(config: CustomWebProviderConfig, prompt: String, ratio: String?, refImages: List<ChatAttachment> = emptyList()): List<String> = lock.withLock {
         val (view, _) = awaitAttached(config)
         if (isArenaGuestWebConfig(config)) {
             return@withLock generateArenaImage(view, config, prompt, ratio)
         }
         if (isKnownCustomWebHybridImagePage(config.loginUrl)) {
-            return@withLock generateLongCat(view, config, prompt)
+            return@withLock generateLongCat(view, config, prompt, refImages)
         }
         if (config.loginUrl.contains("image.dddd.zone", ignoreCase = true)) {
             return@withLock generateDddd(view, config, prompt)
@@ -1685,7 +1688,7 @@ object CustomWebImageAutomation {
         }
     }
 
-    private suspend fun generateLongCat(view: WebView, config: CustomWebProviderConfig, prompt: String): List<String> {
+    private suspend fun generateLongCat(view: WebView, config: CustomWebProviderConfig, prompt: String, refImages: List<ChatAttachment> = emptyList()): List<String> {
         var mode = evaluate(view, """(()=>{const exact=t=>[...document.querySelectorAll('body *')].find(e=>e.offsetParent!==null&&(e.innerText||'').trim()===t);if(exact('图片生成')?.closest('.agent-skills'))return 'active';const item=exact('图片生成');if(item){(item.closest('.v-checked-button')||item).click();return 'clicked'}const more=exact('更多');if(more){const box=more.closest('[data-more="true"]');(box?.querySelector('.van-popover__wrapper')||box||more).click();return 'opened'}return 'missing'})()""")
         if (mode == "opened") {
             delay(800)
@@ -1693,6 +1696,16 @@ object CustomWebImageAutomation {
         }
         if (mode == "missing") throw WebAutomationException("image_mode_not_found", "${config.name} 图片生成模式不可用")
         delay(350)
+        // 注入参考图（图生图）：Longcat 生图界面有 #file-upload-gen_image input
+        if (refImages.isNotEmpty()) {
+            val inj = runCatching { JSONObject(evaluate(view, longCatRefImageScript(refImages))) }.getOrDefault(JSONObject())
+            if (!inj.optBoolean("ok")) {
+                LogStore.w("CustomWebImage", "${config.name} 参考图注入失败: ${inj.optString("error", "unknown")}")
+            } else {
+                LogStore.i("CustomWebImage", "${config.name} 已注入 ${refImages.size} 张参考图")
+                delay(600)  // 等网页解析参考图缩略图
+            }
+        }
         // Switching to image mode injects recommendation thumbnails. Capture the
         // baseline afterwards so those samples cannot be mistaken for this request.
         val baseline = evaluate(view, "JSON.stringify([...document.images].map(i=>i.currentSrc||i.src).filter(Boolean))")
@@ -1713,6 +1726,37 @@ object CustomWebImageAutomation {
             if (fresh.isNotEmpty()) return fresh.take(4)
         }
         throw WebAutomationException("image_timeout", "${config.name} 网页生图等待超时")
+    }
+
+    /** Longcat 生图参考图注入：往 #file-upload-gen_image input 注入 DataTransfer 文件。 */
+    private fun longCatRefImageScript(refs: List<ChatAttachment>): String {
+        val encoded = buildJsonArray {
+            refs.forEach { item ->
+                add(buildJsonObject {
+                    put("name", item.name)
+                    put("mime", item.mime)
+                    put("data", item.dataUrl)
+                })
+            }
+        }.toString()
+        return """
+            (()=>{try{
+              const input=document.querySelector('#file-upload-gen_image')||document.querySelector('input[type="file"]');
+              if(!input)return JSON.stringify({ok:false,error:'file_input_not_found'});
+              const dt=new DataTransfer();
+              for(const item of $encoded){
+                const comma=item.data.indexOf(',');
+                const bytes=atob(item.data.slice(comma+1));
+                const data=new Uint8Array(bytes.length);
+                for(let i=0;i<bytes.length;i++)data[i]=bytes.charCodeAt(i);
+                dt.items.add(new File([data],item.name,{type:item.mime}));
+              }
+              input.files=dt.files;
+              input.dispatchEvent(new Event('input',{bubbles:true}));
+              input.dispatchEvent(new Event('change',{bubbles:true}));
+              return JSON.stringify({ok:true,count:dt.files.length});
+            }catch(e){return JSON.stringify({ok:false,error:String(e)})}})()
+        """.trimIndent()
     }
 
     private suspend fun evaluate(view: WebView, script: String): String =
