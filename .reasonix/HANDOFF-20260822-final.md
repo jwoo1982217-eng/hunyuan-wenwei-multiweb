@@ -113,9 +113,21 @@ adb -s emulator-5554 install -r D:\Temp\patched-aligned-debugSigned.apk
 
 ## 📋 未完成 / 待决定事项
 
-1. **LongCat 视频生成实测**
-   - APK 已安装，需在 App 内：视频 tab → LongCat(美团) → 发提示词
-   - 观察 logcat `tag=LongCatVideo`，确认 JS 执行结果（active/missed/more-tapped）
+1. ~~**LongCat 视频生成实测**~~ ✅ 2026-08-22 已实测：文生视频、图生视频均正常（logcat tag=LongCatVideo / LongCatGen）
+
+### 🧪 2026-08-22 补充实测记录
+
+| 功能 | 结果 | 备注 |
+|------|------|------|
+| 智谱 cogview-3-flash 生图（无水印） | ✅ | `watermark_enabled=false` 生效，画面无"AI生成"字样 |
+| 智谱 cogvideox-flash 视频（无水印） | ✅ | 同参数生效；封面 URL 中 `_watermark.png` 只是资源桶命名 |
+| 美团(自定义web) 图生图 | ✅ | 参考图注入成功（日志："已注入 1 张参考图"），输出为参考图的风格化结果 |
+| 美团(自定义web) 文生视频 | ✅ | 正常 |
+
+**已知非缺陷边缘情况（美团图生图）**：
+- 冷启动后立即发请求可能报 `image_mode_not_found`（页面未加载完、"图片生成"技能入口尚未渲染）→ 重试即可恢复
+- 技能未激活时提交，LongCat 以纯文本回复（非图片）→ 轮询无新图，约 6 分钟后报 `image_timeout`
+- 均为页面状态/时序问题，非代码缺陷；如需加固可给模式检测加重试循环（参照 CustomWebVideoAutomation v9/v10 的做法）
 
 2. **豆包视频额度恢复后**
    - 补抓新会话首条 completion body
