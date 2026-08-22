@@ -108,13 +108,15 @@ set PATH=D:\reasonix_archive\tools\android-sdk\platform-tools;%PATH% && adb -s e
 
 ---
 
-## ☁️ CNB 仓库上传进展
+## ☁️ CNB 仓库上传进展 ✅ 已完成(2026-08-22 14:00)
 
-- 目标:`https://cnb.cool/hunyuan-2026/hunyuan-wenwei-multiweb`(已确认存在)
-- API 发现:190个端点,commit/push 端点不存在,workspace/start 需 `repo-cnb-trigger:rw` scope
-- Token `5Yfqp...` 缺少 `repo-code:rw` / `repo-pr:rw` scope,**无法通过 API 上传**
-- 已创建分支:`patch/handoff-doc`(从 main 头 commit 6963054d)
-- 手动上传步骤:打开 `https://cnb.cool/hunyuan-2026/hunyuan-wenwei-multiweb/-/tree/patch/handoff-doc`,点 `+` 按钮创建文件 `.reasonix/SESSION-HANDOFF-AUTO.md`,复制粘贴内容保存
+- 目标:`https://cnb.cool/hunyuan-2026/hunyuan-wenwei-multiweb`
+- Token `5Yfqp...` 有 `repo-code:rw` scope（可创建 blob/分支），缺 `repo-notes:rw`（无法用 upload/files）
+- 分支 `patch/handoff-doc` 已存在（从 main commit 6963054d）
+- **已通过 isomorphic-git 推送**：本地 clone → checkout patch/handoff-doc → commit 本文件 → push
+- 提交 SHA: `af7f06c6b581`，消息: `docs: update session handoff document (auto-generated)`
+- 访问: `https://cnb.cool/hunyuan-2026/hunyuan-wenwei-multiweb/-/tree/patch/handoff-doc/.reasonix/SESSION-HANDOFF-AUTO.md`
+- 脚本: `.reasonix/cnb-push/upload-handoff.js`
 
 ---
 
