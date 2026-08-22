@@ -19,7 +19,7 @@
 
 ---
 
-## ✅ 已完成：8 处 smali 修复
+## ✅ 已完成：10 处 smali 修复
 
 ### 修复清单
 
@@ -33,6 +33,8 @@
 | 6 | `MainActivityKt.UrlVideo(L98646后)` + 新类 `VideoControlsKt.smali` | App 无播放控件 | 保留原 Player，在其后叠加 media3 compose PlayPauseButton+ProgressSlider |
 | 7 | `executeVideo` Agnes 块后 | App 发 `image_data`，智谱只认 `image_url` | 追加智谱分支：image_data[0] → image_url(data URI) |
 | 8 | `CustomWebVideoAutomation` v9(L2344)/v10(L2437) | JS IIFE 模式检测不触发，需 pointer event tap 序列 | base64 编码替换两处 IIFE，注入 tap 序列（.van-popover__wrapper） |
+| 9 | `adaptToZhipuImage` 方法头(~L4377) | 智谱生图默认加"AI生成"显式+隐式水印 | 方法开头注入 `watermark_enabled=false`（置于条件分支前，所有路径生效）；需账号已签免责声明（个人中心-安全管理-去水印管理） |
+| 10 | `executeVideo` bigmodel.cn 分支(~L2043) | 智谱视频同样默认加水印 | with_audio 注入后追加 `watermark_enabled=false`；官方 VideoCommonRequest 支持同参数 |
 
 ### 关键尺寸映射（cogview 官方）
 
@@ -62,8 +64,8 @@ LongCat smali:     smali_classes4\...\proxy\CustomWebVideoAutomation.smali
                    add-video-controls.ps1 (修复#6)
                    fix-zhipu-i2v.ps1     (修复#7)
                    fix-longcat-skill.ps1 (修复#8)
-最新 APK(8处修复):  D:\Temp\patched-longcat-aligned-debugSigned.apk  (已安装到 emulator-5554)
-旧 APK(7处):       D:\Temp\patched-final5-aligned-debugSigned.apk
+最新 APK(10处修复): D:\Temp\patched-aligned-debugSigned.apk   (已安装到 emulator-5554)
+旧 APK(8处):       D:\Temp\patched-longcat-aligned-debugSigned.apk
 备份目录:          .reasonix\backups\
 apktool:           D:\reasonix_archive\tools\apktool.jar  (v2.9.3)
 JDK:               D:\reasonix_archive\tools\jdk\jdk-17.0.20+8
@@ -163,6 +165,8 @@ adb -s emulator-5554 install -r D:\Temp\patched-aligned-debugSigned.apk
 | `ziphuSizeFor` | ~L4199 | #3：尺寸映射更新 |
 | `apiRoot` | ~L540 | #4：支持 /v1~v6 结尾 |
 | `executeVideo` | ~L2053 | #5/#7：image_data → image / image_url 转换 |
+| `executeVideo` | ~L2043 | #10：bigmodel.cn 分支注入 watermark_enabled=false |
+| `adaptToZhipuImage` | ~L4377 | #9：方法头注入 watermark_enabled=false |
 
 ### CustomWebVideoAutomation.smali（修复 #8）
 
