@@ -24,7 +24,9 @@ object GeneratedImageStore {
             "image/jpeg" -> "jpg"
             "image/webp" -> "webp"
             "image/gif" -> "gif"
-            else -> "png"
+            "video/mp4" -> "mp4"
+            "video/webm" -> "webm"
+            else -> if (mime.startsWith("video/")) "mp4" else "png"
         }
         val bytes = Base64.decode(dataUrl.substring(comma + 1), Base64.DEFAULT)
         require(bytes.isNotEmpty()) { "Gemini 图片数据为空" }
@@ -49,7 +51,9 @@ object GeneratedImageStore {
             "image/jpeg" -> "jpg"
             "image/webp" -> "webp"
             "image/gif" -> "gif"
-            else -> "png"
+            "video/mp4" -> "mp4"
+            "video/webm" -> "webm"
+            else -> if (mime.startsWith("video/")) "mp4" else "png"
         }
         val file = File(requireNotNull(directory) { "图片缓存未初始化" }, "${UUID.randomUUID()}.$extension")
         file.writeBytes(bytes)

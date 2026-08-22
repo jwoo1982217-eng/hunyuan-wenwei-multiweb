@@ -17,12 +17,15 @@ import android.webkit.JavascriptInterface
 import android.os.Handler
 import android.os.Looper
 import android.widget.ImageView
+import android.widget.VideoView
+import android.widget.MediaController
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.BorderStroke
@@ -41,7 +44,11 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.ImeAction
@@ -73,6 +80,7 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlin.coroutines.resume
@@ -80,6 +88,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.io.File
+import java.security.MessageDigest
 import java.util.concurrent.atomic.AtomicReference
 
 private class WebSessionJsBridge(
@@ -97,6 +106,15 @@ private class WebSessionJsBridge(
         Handler(Looper.getMainLooper()).post { onSaveImageUrl(imageUrl) }
     }
 }
+private class TouchWebView(context: Context) : WebView(context) {
+    override fun onTouchEvent(event: android.view.MotionEvent): Boolean {
+        if (event.actionMasked == android.view.MotionEvent.ACTION_DOWN) {
+            parent?.requestDisallowInterceptTouchEvent(true)
+        }
+        return super.onTouchEvent(event)
+    }
+}
+
 private fun webLoginUserAgent(
     context: Context,
     provider: WebProviderType,
@@ -245,7 +263,12 @@ class MainActivity : ComponentActivity() {
     }
 
     fun openWebFileChooser(callback: android.webkit.ValueCallback<Array<Uri>>) {
+        android.util.Log.i("NativeWeb", "onShowFileChooser callback received")
         pendingFileCallback = callback
+        if (com.wenwei.deepseekproxy.proxy.NativeWebFileChooserBridge.consume(this, callback)) {
+            pendingFileCallback = null
+            return
+        }
         runCatching { fileChooserLauncher.launch("image/*") }
             .onFailure {
                 pendingFileCallback = null
@@ -255,6 +278,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        android.util.Log.i("MainActivity", "=== onCreate called, app starting ===")
         setContent { App(vm) }
     }
 }
@@ -284,6 +308,12 @@ fun App(vm: ProxyViewModel) {
     var input by remember { mutableStateOf("") }
     var streamMode by remember { mutableStateOf(streamFlow) }
     var tab by remember { mutableStateOf(0) }
+    
+    // 监控当前 tab
+    LaunchedEffect(tab) {
+        android.util.Log.i("CurrentTab", "当前 tab=$tab (0=中转, 1=接口, 2=日志, 3=浏览器)")
+    }
+    
     var showCookieDialog by remember { mutableStateOf(false) }
     var browserRequestedModelId by remember { mutableStateOf(modelFlow) }
     val externalBrowserRequest by BrowserRelayActivation.requests.collectAsState()
@@ -316,10 +346,22 @@ fun App(vm: ProxyViewModel) {
                             selectedTabIndex = tab,
                             modifier = Modifier.fillMaxWidth()
                         ) {
-                            Tab(selected = tab == 0, onClick = { tab = 0 }) { Text("中转") }
-                            Tab(selected = tab == 1, onClick = { tab = 1 }) { Text("接口") }
-                            Tab(selected = tab == 2, onClick = { tab = 2 }) { Text("日志") }
-                            Tab(selected = tab == 3, onClick = { tab = 3 }) { Text("浏览器") }
+                            Tab(selected = tab == 0, onClick = { 
+                                android.util.Log.i("TabSwitch", "切换到 tab=0 (中转)")
+                                tab = 0 
+                            }) { Text("中转") }
+                            Tab(selected = tab == 1, onClick = { 
+                                android.util.Log.i("TabSwitch", "切换到 tab=1 (接口)")
+                                tab = 1 
+                            }) { Text("接口") }
+                            Tab(selected = tab == 2, onClick = { 
+                                android.util.Log.i("TabSwitch", "切换到 tab=2 (日志)")
+                                tab = 2 
+                            }) { Text("日志") }
+                            Tab(selected = tab == 3, onClick = { 
+                                android.util.Log.i("TabSwitch", "切换到 tab=3 (浏览器)")
+                                tab = 3 
+                            }) { Text("浏览器") }
                         }
                     }
                 )
@@ -390,6 +432,10 @@ fun App(vm: ProxyViewModel) {
                                 vm.generateImage(payload, attachments)
                                 input = ""
                             },
+                            onGenerateVideo = { payload, attachments ->
+                                vm.generateVideo(payload, attachments)
+                                input = ""
+                            },
                             modifier = Modifier.fillMaxSize().padding(horizontal = 10.dp, vertical = 6.dp)
                         )
                     }
@@ -458,7 +504,7 @@ fun ApiProviderScreen(
                                 Text(if (provider.enabled) "已启用" else "已停用", color = MaterialTheme.colorScheme.primary)
                             }
                             Text(provider.normalizedBaseUrl(), style = MaterialTheme.typography.bodySmall)
-                            Text("聊天模型 ${provider.chatModels.size} 个 · 生图模型 ${provider.imageModels.size} 个")
+                            Text("聊天模型 ${provider.chatModels.size} 个 · 生图模型 ${provider.imageModels.size} 个 · 视频模型 ${provider.videoModels.size} 个")
                             status[provider.id]?.let { Text(it, color = MaterialTheme.colorScheme.primary) }
                             FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                                 TextButton(onClick = { editing = provider }) { Text("编辑") }
@@ -495,8 +541,19 @@ private fun ApiProviderEditorDialog(
     var name by remember(initial?.id) { mutableStateOf(initial?.name.orEmpty()) }
     var baseUrl by remember(initial?.id) { mutableStateOf(initial?.baseUrl.orEmpty()) }
     var apiKey by remember(initial?.id) { mutableStateOf(initial?.apiKey.orEmpty()) }
-    var chatModels by remember(initial?.id) { mutableStateOf(initial?.chatModels?.joinToString("\n").orEmpty()) }
+    // 打开编辑框时，把聊天模型里明显是 video 的模型自动挪到视频框（与「重新解析模型」的
+    // 挪移规则一致），避免旧的视频模型残留聊天框、用户手动搬的麻烦。
+    val initialChat = remember(initial?.id) {
+        val chat = initial?.chatModels.orEmpty()
+        val video = initial?.videoModels.orEmpty()
+        fun isVideoModel(id: String): Boolean =
+            id.contains("video", ignoreCase = true) ||
+                Regex("sora|kling|wanx|veo|t2v|v2v|text[-_]?to[-_]?video|animate|cogvideo", RegexOption.IGNORE_CASE).containsMatchIn(id)
+        chat.filterNot(::isVideoModel) to (video + chat.filter(::isVideoModel)).distinct()
+    }
+    var chatModels by remember(initial?.id) { mutableStateOf(initialChat.first.joinToString("\n")) }
     var imageModels by remember(initial?.id) { mutableStateOf(initial?.imageModels?.joinToString("\n").orEmpty()) }
+    var videoModels by remember(initial?.id) { mutableStateOf(initialChat.second.joinToString("\n")) }
     var enabled by remember(initial?.id) { mutableStateOf(initial?.enabled ?: true) }
 
     fun parseModels(value: String): List<String> = value.split(',', '\n', ';')
@@ -507,7 +564,7 @@ private fun ApiProviderEditorDialog(
         title = { Text(if (initial == null) "添加 API 接口" else "编辑 API 接口") },
         text = {
             Column(
-                Modifier.fillMaxWidth().heightIn(max = 520.dp),
+                Modifier.fillMaxWidth().verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 OutlinedTextField(name, { name = it }, label = { Text("接口名称") }, singleLine = true, modifier = Modifier.fillMaxWidth())
@@ -530,6 +587,11 @@ private fun ApiProviderEditorDialog(
                     label = { Text("生图模型（逗号或换行分隔）") },
                     minLines = 2, maxLines = 4, modifier = Modifier.fillMaxWidth()
                 )
+                OutlinedTextField(
+                    videoModels, { videoModels = it },
+                    label = { Text("视频模型（逗号或换行分隔）") },
+                    minLines = 2, maxLines = 4, modifier = Modifier.fillMaxWidth()
+                )
                 TextButton(
                     enabled = chatModels.isNotBlank(),
                     onClick = {
@@ -537,6 +599,13 @@ private fun ApiProviderEditorDialog(
                             .distinct().joinToString("\n")
                     }
                 ) { Text("上游未声明生图能力？把聊天模型加入生图候选") }
+                TextButton(
+                    enabled = chatModels.isNotBlank(),
+                    onClick = {
+                        videoModels = (parseModels(videoModels) + parseModels(chatModels))
+                            .distinct().joinToString("\n")
+                    }
+                ) { Text("上游未声明视频能力？把聊天模型加入视频候选") }
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text("启用接口", Modifier.weight(1f))
                     Switch(enabled, { enabled = it })
@@ -551,7 +620,7 @@ private fun ApiProviderEditorDialog(
                     onSave(ApiProviderConfig(
                         id = initial?.id ?: java.util.UUID.randomUUID().toString(),
                         name = name.trim(), baseUrl = baseUrl.trim(), apiKey = apiKey.trim(),
-                        chatModels = parseModels(chatModels), imageModels = parseModels(imageModels), enabled = enabled
+                        chatModels = parseModels(chatModels), imageModels = parseModels(imageModels), videoModels = parseModels(videoModels), enabled = enabled
                     ))
                 }
             ) { Text("保存") }
@@ -585,19 +654,39 @@ fun ProxyScreen(
     onSend: (String, List<Uri>) -> Unit,
     onRoundtable: (String, List<String>, List<Uri>) -> Unit,
     onGenerate: (String, List<Uri>) -> Unit,
+    onGenerateVideo: (String, List<Uri>) -> Unit = onGenerate,
     modifier: Modifier = Modifier
 ) {
+    android.util.Log.i("ProxyScreen", "=== ProxyScreen recomposing, model=$model, input=$input ===")
     val portFlow by vm.port.collectAsState()
     val context = LocalContext.current
 
     val runtimeModels by vm.providerModels.collectAsState()
     val apiProviderConfigs by vm.apiProviders.collectAsState()
     val imageModelFlow by vm.imageModel.collectAsState()
-    val chatModelItems = (com.wenwei.deepseekproxy.proxy.ProviderCatalog.models.filter { it.enabled } + runtimeModels)
-        .filter {
-            it.enabled &&
-                com.wenwei.deepseekproxy.proxy.ProviderCapability.CHAT in it.capabilities
-        }.distinctBy { it.publicModelId }
+    val videoModelFlow by vm.videoModel.collectAsState()
+    // 过滤「冗余纯别名」：buildPlainModelAliases 生成的 id 就是 upstream，
+    // 若存在带接口前缀版本（X--upstream），纯别名只是兜底，UI 里隐藏避免成对。
+    fun <T> dedupeProviderModels(models: List<T>): List<T> {
+        val prefixed = models.mapNotNull { (it as? com.wenwei.deepseekproxy.proxy.ProviderModel)?.publicModelId }
+            .filter { it.contains("--") }
+            .map { it.substringAfter("--") }
+            .toSet()
+        return models.filter {
+            val m = it as? com.wenwei.deepseekproxy.proxy.ProviderModel ?: return@filter true
+            val id = m.publicModelId
+            // 纯名（不含 --）且存在带前缀别名版本 → 隐藏纯名，保留带前缀版
+            val isPlain = !id.contains("--")
+            !(isPlain && prefixed.any { p -> p.equals(id, ignoreCase = true) })
+        }
+    }
+    val chatModelItems = dedupeProviderModels(
+        (com.wenwei.deepseekproxy.proxy.ProviderCatalog.models.filter { it.enabled } + runtimeModels)
+            .filter {
+                it.enabled &&
+                    com.wenwei.deepseekproxy.proxy.ProviderCapability.CHAT in it.capabilities
+            }.distinctBy { it.publicModelId.lowercase() }
+    )
     val modelOptions = chatModelItems.map { it.publicModelId to it.displayName }
     fun providerKey(item: com.wenwei.deepseekproxy.proxy.ProviderModel): String = when (item.providerType) {
         WebProviderType.CUSTOM_WEB -> "custom:${item.accountId}"
@@ -626,13 +715,24 @@ fun ProxyScreen(
     fun persistHidden(set: Set<String>) {
         hiddenPrefs.edit().putStringSet("hidden", set).apply()
     }
-    fun isHiddenProviderKey(key: String): Boolean =
-        key.startsWith("type:") && key.removePrefix("type:") in hiddenProviders
+    fun isHiddenProviderKey(key: String): Boolean = when {
+        key.startsWith("type:") -> key.removePrefix("type:") in hiddenProviders
+        key.startsWith("api:") -> key in hiddenProviders
+        key.startsWith("custom:") -> key in hiddenProviders
+        else -> false
+    }
+    // 恢复列表：type:（内置 Web）/ api:（接口供应商）/ custom:（自定义 Web）都支持
     val hiddenWebProviders = remember(hiddenProviders) {
-        WebProviderType.entries.filter { it.name in hiddenProviders }
+        hiddenProviders.mapNotNull { h ->
+            when {
+                h.startsWith("api:") -> Triple(h, "api", h.removePrefix("api:"))
+                h.startsWith("custom:") -> Triple(h, "custom", h.removePrefix("custom:"))
+                else -> Triple(h, "type", h)
+            }
+        }
     }
     val visibleProviderOptions = providerOptions.filter { !isHiddenProviderKey(it.first) }
-    var pendingHideRelayProvider by remember { mutableStateOf<Triple<String, String, Boolean>?>(null) }
+    var pendingHideRelayProvider by remember { mutableStateOf<Triple<String, String, String>?>(null) }
     var hiddenMenu by remember { mutableStateOf(false) }
     val selectedProviderKey = chatModelItems.firstOrNull { it.publicModelId == model }
         ?.let(::providerKey) ?: visibleProviderOptions.firstOrNull()?.first
@@ -644,6 +744,17 @@ fun ProxyScreen(
     var revealLocalToken by remember { mutableStateOf(false) }
     var confirmTokenReset by remember { mutableStateOf(false) }
     var imageMode by remember { mutableStateOf(false) }
+    var videoMode by remember { mutableStateOf(false) }
+    
+    // 监控 imageMode 变化
+    LaunchedEffect(imageMode) {
+        android.util.Log.i("ImageModeMonitor", "imageMode state changed to: $imageMode")
+    }
+    // 监控 videoMode 变化
+    LaunchedEffect(videoMode) {
+        android.util.Log.i("VideoModeMonitor", "videoMode state changed to: $videoMode")
+    }
+    
     var roundtableMode by remember { mutableStateOf(false) }
     var roundtableDialog by remember { mutableStateOf(false) }
     var roundtableModels by remember { mutableStateOf<List<String>>(emptyList()) }
@@ -765,22 +876,48 @@ fun ProxyScreen(
                     modifier = Modifier.weight(1f)
                 )
                 FilterChip(
-                    selected = !imageMode,
+                    selected = !imageMode && !videoMode,
                     onClick = {
                         imageMode = false
+                        videoMode = false
                         onBrowserModelRequested(model)
                     },
                     label = { Text("聊天") }
                 )
                 Spacer(Modifier.width(6.dp))
-                FilterChip(
-                    selected = imageMode,
-                    onClick = {
-                        imageMode = true
-                        onBrowserModelRequested(imageModelFlow)
-                    },
-                    label = { Text("生图") }
-                )
+                // 生图 chip
+                run {
+                    android.util.Log.i("ChipRender", "生图 FilterChip 正在渲染, imageMode=$imageMode, videoMode=$videoMode")
+                    FilterChip(
+                        selected = imageMode,
+                        onClick = {
+                            android.util.Log.i("ImageModeSwitch", "【生图】chip 被点击！")
+                            android.util.Log.i("ImageModeSwitch", "点击前 imageMode=$imageMode, videoMode=$videoMode")
+                            imageMode = true
+                            videoMode = false
+                            android.util.Log.i("ImageModeSwitch", "点击后 imageMode=$imageMode, videoMode=$videoMode")
+                            onBrowserModelRequested(imageModelFlow)
+                        },
+                        label = { Text("生图") }
+                    )
+                }
+                Spacer(Modifier.width(6.dp))
+                // 视频 chip
+                run {
+                    FilterChip(
+                        selected = videoMode,
+                        onClick = {
+                            android.util.Log.i("VideoModeSwitch", "【视频】chip 被点击！")
+                            android.util.Log.i("VideoModeSwitch", "点击前 imageMode=$imageMode, videoMode=$videoMode")
+                            imageMode = false
+                            videoMode = true
+                            android.util.Log.i("VideoModeSwitch", "点击后 imageMode=$imageMode, videoMode=$videoMode")
+                            onBrowserModelRequested(imageModelFlow)
+                        },
+                        label = { Text("视频") }
+                    )
+                }
+                android.util.Log.i("VideoModeChip", "渲染完成 imageMode=$imageMode, videoMode=$videoMode")
                 TextButton(
                     onClick = { settingsExpanded = !settingsExpanded },
                     contentPadding = PaddingValues(horizontal = 8.dp)
@@ -854,7 +991,7 @@ fun ProxyScreen(
         }
 
         Spacer(Modifier.height(6.dp))
-        if (!imageMode) {
+        if (!imageMode && !videoMode) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 ExposedDropdownMenuBox(
                     expanded = providerExpanded,
@@ -897,12 +1034,10 @@ fun ProxyScreen(
                                             chatModelItems.firstOrNull { providerKey(it) == optionKey }?.publicModelId?.let(onModelChange)
                                             providerExpanded = false
                                         },
-                                        onLongClick = if (optionKey.startsWith("type:")) {
-                                            {
-                                                providerExpanded = false
-                                                pendingHideRelayProvider = Triple(optionKey, providerLabel, false)
-                                            }
-                                        } else null
+                                        onLongClick = {
+                                            providerExpanded = false
+                                            pendingHideRelayProvider = Triple(optionKey, providerLabel, "chat")
+                                        }
                                     )
                                     .padding(horizontal = 16.dp, vertical = 12.dp)
                             ) {
@@ -924,8 +1059,15 @@ fun ProxyScreen(
                     label = { Text("流式") }
                 )
             }
-        } else {
-            val imageModels = com.wenwei.deepseekproxy.proxy.ProviderCatalog.imageModels
+        } else if (imageMode) {
+            val imageModels = dedupeProviderModels(com.wenwei.deepseekproxy.proxy.ProviderCatalog.imageModels)
+                .distinctBy { it.publicModelId.lowercase() }
+            LaunchedEffect(imageModels) {
+                android.util.Log.i("ImageModels", "所有可用生图模型(${imageModels.size}):")
+                imageModels.forEach { model ->
+                    android.util.Log.i("ImageModels", "  ${model.publicModelId} -> providerKey=${providerKey(model)}, type=${model.providerType.name}, accountId=${model.accountId}")
+                }
+            }
             val imageProviderOptions = imageModels.groupBy(::providerKey).map { (key, items) ->
                 key to providerLabel(items)
             }
@@ -972,18 +1114,25 @@ fun ProxyScreen(
                                 .fillMaxWidth()
                                 .combinedClickable(
                                     onClick = {
-                                        imageModels.firstOrNull { providerKey(it) == optionKey }?.publicModelId?.let {
+                                        val foundModel = imageModels.firstOrNull { providerKey(it) == optionKey }
+                                        android.util.Log.i("ImageSwitch", "切换生图供应商: optionKey=$optionKey, label=$label")
+                                        android.util.Log.i("ImageSwitch", "  查找结果: foundModel=${foundModel?.publicModelId}")
+                                        android.util.Log.i("ImageSwitch", "  当前 imageModel.value=${imageModelFlow}")
+                                        android.util.Log.i("ImageSwitch", "  匹配条件: 查找 providerKey(it)==$optionKey 的模型")
+                                        imageModels.filter { providerKey(it) == optionKey }.forEach {
+                                            android.util.Log.i("ImageSwitch", "    匹配到: ${it.publicModelId}")
+                                        }
+                                        foundModel?.publicModelId?.let {
                                             vm.setImageModel(it)
                                             onBrowserModelRequested(it)
-                                        }
+                                            android.util.Log.i("ImageSwitch", "  已设置 imageModel=$it")
+                                        } ?: android.util.Log.e("ImageSwitch", "  未找到匹配模型，imageModel 保持不变")
                                         imageProviderExpanded = false
                                     },
-                                    onLongClick = if (optionKey.startsWith("type:")) {
-                                        {
-                                            imageProviderExpanded = false
-                                            pendingHideRelayProvider = Triple(optionKey, label, true)
-                                        }
-                                    } else null
+                                    onLongClick = {
+                                    imageProviderExpanded = false
+                                    pendingHideRelayProvider = Triple(optionKey, label, "image")
+                                }
                                 )
                                 .padding(horizontal = 16.dp, vertical = 12.dp)
                         ) {
@@ -1054,7 +1203,7 @@ fun ProxyScreen(
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Text(
-                                IMAGE_SIZE_OPTIONS.firstOrNull { it.second == imageSizeFlow }?.first ?: imageSizeFlow,
+                                listOf("9:16 (竖屏)" to "9:16", "3:4 (竖版)" to "3:4", "1:1 (方形)" to "1:1", "16:9 (横屏)" to "16:9", "4:3 (横版)" to "4:3", "2:5 (长竖屏)" to "2:5", "5:2 (长横屏)" to "5:2").firstOrNull { (_, size) -> size == imageSizeFlow }?.first ?: imageSizeFlow,
                                 style = MaterialTheme.typography.bodyMedium,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
@@ -1064,7 +1213,7 @@ fun ProxyScreen(
                         }
                     }
                     ExposedDropdownMenu(sizeExpanded, { sizeExpanded = false }) {
-                        IMAGE_SIZE_OPTIONS.forEach { (label, id) -> DropdownMenuItem(
+                        listOf("9:16 (竖屏)" to "9:16", "3:4 (竖版)" to "3:4", "1:1 (方形)" to "1:1", "16:9 (横屏)" to "16:9", "4:3 (横版)" to "4:3", "2:5 (长竖屏)" to "2:5", "5:2 (长横屏)" to "5:2").forEach { (label, id) -> DropdownMenuItem(
                             text = { Text(label) },
                             onClick = { vm.setImageSize(id); sizeExpanded = false }
                         ) }
@@ -1072,29 +1221,166 @@ fun ProxyScreen(
                 }
             }
         }
-        pendingHideRelayProvider?.let { (hideKey, hideLabel, isImage) ->
+        // 视频模式：照生图做「视频供应商 + 视频模型」下拉。
+        else {
+            // 视频 tab：WebView 驱动的 CUSTOM_WEB + 接口 tab 的 OPENAI_COMPATIBLE 都支持视频
+            val videoModels = dedupeProviderModels(com.wenwei.deepseekproxy.proxy.ProviderCatalog.videoModels)
+                .filter {
+                    it.providerType == WebProviderType.CUSTOM_WEB ||
+                        it.providerType == WebProviderType.OPENAI_COMPATIBLE ||
+                        it.providerType == WebProviderType.DOUBAO_WEB
+                }
+                .distinctBy { it.publicModelId.lowercase() }
+            // 视频 tab 复用生图模型源，显示时把「生图」替换为「视频」
+            fun videoLabel(s: String): String = s.replace("生图", "视频")
+            val videoProviderOptions = videoModels.groupBy(::providerKey).map { (key, items) ->
+                // 供应商名去尾部「视频」（如「美团 视频」→「美团」），模型名不受影响
+                key to videoLabel(providerLabel(items)).replace(Regex("\\s*视频$"), "")
+            }
+            val visibleVideoProviderOptions = videoProviderOptions.filter { !isHiddenProviderKey(it.first) }
+            val selectedVideoProviderKey = videoModels.firstOrNull { it.publicModelId == videoModelFlow }
+                ?.let(::providerKey) ?: visibleVideoProviderOptions.firstOrNull()?.first
+            val selectedVideoProviderLabel = videoProviderOptions
+                .firstOrNull { it.first == selectedVideoProviderKey }?.second.orEmpty()
+            val selectedProviderVideoModels = videoModels.filter { providerKey(it) == selectedVideoProviderKey }
+            var videoProviderExpanded by remember { mutableStateOf(false) }
+            var videoModelExpanded by remember { mutableStateOf(false) }
+            ExposedDropdownMenuBox(
+                expanded = videoProviderExpanded,
+                onExpandedChange = { videoProviderExpanded = it },
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Surface(
+                    modifier = Modifier.menuAnchor().fillMaxWidth().heightIn(min = 44.dp),
+                    shape = RoundedCornerShape(12.dp),
+                    color = MaterialTheme.colorScheme.surface,
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
+                ) {
+                    Row(
+                        Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("视频供应商 · ", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text(
+                            selectedVideoProviderLabel,
+                            style = MaterialTheme.typography.bodyMedium,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f)
+                        )
+                        Text(if (videoProviderExpanded) "▴" else "▾", modifier = Modifier.padding(start = 6.dp))
+                    }
+                }
+                ExposedDropdownMenu(videoProviderExpanded, { videoProviderExpanded = false }) {
+                    visibleVideoProviderOptions.forEach { (optionKey, label) ->
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .combinedClickable(
+                                    onClick = {
+                                        videoModels.firstOrNull { providerKey(it) == optionKey }?.publicModelId?.let {
+                                            vm.setVideoModel(it)
+                                            onBrowserModelRequested(it)
+                                        }
+                                        videoProviderExpanded = false
+                                    },
+                                    onLongClick = {
+                                        videoProviderExpanded = false
+                                        pendingHideRelayProvider = Triple(optionKey, label, "video")
+                                    }
+                                )
+                                .padding(horizontal = 16.dp, vertical = 12.dp)
+                        ) {
+                            Text(label)
+                        }
+                    }
+                    if (hiddenWebProviders.isNotEmpty()) {
+                        DropdownMenuItem(
+                            text = { Text("已隐藏的供应商（${hiddenWebProviders.size}）") },
+                            onClick = { videoProviderExpanded = false; hiddenMenu = true }
+                        )
+                    }
+                }
+            }
+            Spacer(Modifier.height(6.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                ExposedDropdownMenuBox(
+                    expanded = videoModelExpanded,
+                    onExpandedChange = { videoModelExpanded = it },
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Surface(
+                        modifier = Modifier.menuAnchor().fillMaxWidth().heightIn(min = 44.dp),
+                        shape = RoundedCornerShape(12.dp),
+                        color = MaterialTheme.colorScheme.surface,
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
+                    ) {
+                        Row(
+                            Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text("视频模型 · ", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text(
+                                videoLabel(videoModels.firstOrNull { it.publicModelId == videoModelFlow }?.displayName ?: videoModelFlow),
+                                style = MaterialTheme.typography.bodyMedium,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f)
+                            )
+                            Text(if (videoModelExpanded) "▴" else "▾", modifier = Modifier.padding(start = 4.dp))
+                        }
+                    }
+                    ExposedDropdownMenu(videoModelExpanded, { videoModelExpanded = false }) {
+                        selectedProviderVideoModels.forEach { item -> DropdownMenuItem(
+                            text = { Text(videoLabel(item.groupedLabel)) },
+                            onClick = {
+                                vm.setVideoModel(item.publicModelId)
+                                onBrowserModelRequested(item.publicModelId)
+                                videoModelExpanded = false
+                            }
+                        ) }
+                    }
+                }
+            }
+        }
+        pendingHideRelayProvider?.let { (hideKey, hideLabel, hideMode) ->
             AlertDialog(
                 onDismissRequest = { pendingHideRelayProvider = null },
                 title = { Text("隐藏供应商") },
                 text = { Text("确定要隐藏「$hideLabel」吗？隐藏后可在「已隐藏的供应商」中恢复。") },
                 confirmButton = {
                     TextButton(onClick = {
-                        val newSet = hiddenProviders + hideKey.removePrefix("type:")
+                        // type: 前缀存纯名（兼容旧数据）；api:/custom: 存完整 key
+                        val storedKey = if (hideKey.startsWith("type:")) hideKey.removePrefix("type:") else hideKey
+                        val newSet = hiddenProviders + storedKey
                         hiddenProviders = newSet
                         persistHidden(newSet)
                         // 隐藏的是当前选中供应商时，回退到第一个可见供应商，避免「幽灵选中」
-                        if (isImage) {
-                            val imgModels = com.wenwei.deepseekproxy.proxy.ProviderCatalog.imageModels
-                            val curKey = imgModels.firstOrNull { it.publicModelId == imageModelFlow }?.let(::providerKey)
-                            if (curKey == hideKey) {
-                                imgModels.firstOrNull { providerKey(it) != hideKey && !isHiddenProviderKey(providerKey(it)) }?.publicModelId?.let {
-                                    vm.setImageModel(it)
-                                    onBrowserModelRequested(it)
+                        when (hideMode) {
+                            "image" -> {
+                                val imgModels = com.wenwei.deepseekproxy.proxy.ProviderCatalog.imageModels
+                                val curKey = imgModels.firstOrNull { it.publicModelId == imageModelFlow }?.let(::providerKey)
+                                if (curKey == hideKey) {
+                                    imgModels.firstOrNull { providerKey(it) != hideKey && !isHiddenProviderKey(providerKey(it)) }?.publicModelId?.let {
+                                        vm.setImageModel(it)
+                                        onBrowserModelRequested(it)
+                                    }
                                 }
                             }
-                        } else if (selectedProviderKey == hideKey) {
-                            providerOptions.firstOrNull { it.first != hideKey && !isHiddenProviderKey(it.first) }?.first?.let { k ->
-                                chatModelItems.firstOrNull { providerKey(it) == k }?.publicModelId?.let(onModelChange)
+                            "video" -> {
+                                val vidModels = com.wenwei.deepseekproxy.proxy.ProviderCatalog.videoModels
+                                val curKey = vidModels.firstOrNull { it.publicModelId == videoModelFlow }?.let(::providerKey)
+                                if (curKey == hideKey) {
+                                    vidModels.firstOrNull { providerKey(it) != hideKey && !isHiddenProviderKey(providerKey(it)) }?.publicModelId?.let {
+                                        vm.setVideoModel(it)
+                                        onBrowserModelRequested(it)
+                                    }
+                                }
+                            }
+                            else -> if (selectedProviderKey == hideKey) {
+                                providerOptions.firstOrNull { it.first != hideKey && !isHiddenProviderKey(it.first) }?.first?.let { k ->
+                                    chatModelItems.firstOrNull { providerKey(it) == k }?.publicModelId?.let(onModelChange)
+                                }
                             }
                         }
                         pendingHideRelayProvider = null
@@ -1114,16 +1400,21 @@ fun ProxyScreen(
                         if (hiddenWebProviders.isEmpty()) {
                             Text("暂无隐藏的供应商", color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
-                        hiddenWebProviders.forEach { item ->
+                        hiddenWebProviders.forEach { (storedKey, kind, id) ->
+                            val display = when (kind) {
+                                "api" -> apiProviderConfigs.firstOrNull { it.id == id }?.name ?: id
+                                "custom" -> com.wenwei.deepseekproxy.proxy.CustomWebProviderRegistry.find(id)?.name ?: id
+                                else -> WebProviderType.entries.firstOrNull { it.name == id }?.displayName ?: id
+                            }
                             TextButton(
                                 modifier = Modifier.fillMaxWidth(),
                                 onClick = {
-                                    val newSet = hiddenProviders - item.name
+                                    val newSet = hiddenProviders - storedKey
                                     hiddenProviders = newSet
                                     persistHidden(newSet)
                                     hiddenMenu = false
                                 }
-                            ) { Text(item.displayName) }
+                            ) { Text(display) }
                         }
                     }
                 },
@@ -1160,6 +1451,10 @@ fun ProxyScreen(
                                 Spacer(Modifier.height(6.dp))
                                 UrlImage(url, Modifier.fillMaxWidth())
                             }
+                            msg.videos.forEach { url ->
+                                Spacer(Modifier.height(6.dp))
+                                UrlVideo(url, Modifier.fillMaxWidth())
+                            }
                         }
                     }
                 }
@@ -1186,13 +1481,15 @@ fun ProxyScreen(
                     }
                 }
                 fun doSend() {
+                    android.util.Log.i("SendButton", "doSend() 被调用，imageMode=$imageMode, videoMode=$videoMode, input长度=${input.length}, 附件数=${pendingAttachments.size}")
                     val payload = input.trim().ifBlank {
                         if (pendingAttachments.isNotEmpty()) "请分析附件" else ""
                     }
+                    android.util.Log.i("SendButton", "payload='$payload'")
                     val hasImage = pendingAttachments.any { uri ->
                         context.contentResolver.getType(uri)?.startsWith("image/") == true
                     }
-                    if (!imageMode && hasImage) {
+                    if (!imageMode && !videoMode && hasImage) {
                         val selectedModels = if (roundtableMode) {
                             roundtableModels.mapNotNull { id -> chatModelItems.firstOrNull { it.publicModelId == id } }
                         } else listOfNotNull(chatModelItems.firstOrNull { it.publicModelId == model })
@@ -1206,9 +1503,25 @@ fun ProxyScreen(
                             return
                         }
                     }
-                    if (imageMode) onGenerate(payload, pendingAttachments)
-                    else if (roundtableMode && roundtableModels.size >= 2) onRoundtable(payload, roundtableModels, pendingAttachments)
-                    else onSend(payload, pendingAttachments)
+                    val currentVideo = com.wenwei.deepseekproxy.proxy.ProviderCatalog.find(model)?.let { ProviderCapability.VIDEO_GENERATION in it.capabilities } == true
+                    if (currentVideo) {
+                        videoMode = true
+                        imageMode = false
+                    }
+                    android.util.Log.i("SendButton", "准备调用回调: imageMode=$imageMode, videoMode=$videoMode, roundtableMode=$roundtableMode")
+                    if (videoMode) {
+                        android.util.Log.i("SendButton", "调用 onGenerateVideo")
+                        onGenerateVideo(payload, pendingAttachments)
+                    } else if (imageMode) {
+                        android.util.Log.i("SendButton", "调用 onGenerate")
+                        onGenerate(payload, pendingAttachments)
+                    } else if (roundtableMode && roundtableModels.size >= 2) {
+                        android.util.Log.i("SendButton", "调用 onRoundtable")
+                        onRoundtable(payload, roundtableModels, pendingAttachments)
+                    } else {
+                        android.util.Log.i("SendButton", "调用 onSend")
+                        onSend(payload, pendingAttachments)
+                    }
                     pendingAttachments = emptyList()
                 }
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1226,14 +1539,18 @@ fun ProxyScreen(
                         decorationBox = { inner ->
                             Box {
                                 if (input.isBlank()) Text(
-                                    if (imageMode) "描述画面" else "输入消息",
+                                    when {
+                                        imageMode -> "描述画面"
+                                        videoMode -> "描述视频"
+                                        else -> "输入消息"
+                                    },
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
                                 inner()
                             }
                         }
                     )
-                    if (!imageMode) {
+                    if (!imageMode && !videoMode) {
                         val hasPendingImage = pendingAttachments.any { uri ->
                             context.contentResolver.getType(uri)?.startsWith("image/") == true
                         }
@@ -1285,9 +1602,19 @@ fun ProxyScreen(
                     }
                     Spacer(Modifier.width(4.dp))
                     FilledIconButton(
-                        onClick = { doSend() },
+                        onClick = { 
+                            android.util.Log.i("SendButtonClick", "Button clicked! imageMode=$imageMode, videoMode=$videoMode, input='$input', attachments=${pendingAttachments.size}")
+                            doSend() 
+                        },
                         enabled = input.isNotBlank() || pendingAttachments.isNotEmpty()
-                    ) { Text(if (imageMode) "画" else "↑", style = MaterialTheme.typography.titleMedium) }
+                    ) { Text(
+                        when {
+                            imageMode -> "🎨"
+                            videoMode -> "🎬"
+                            else -> "↑"
+                        },
+                        style = MaterialTheme.typography.titleMedium
+                    ) }
                 }
             }
         }
@@ -1392,6 +1719,92 @@ fun UrlImage(url: String, modifier: Modifier = Modifier) {
     }
 }
 
+/** 消息内视频播放器：Media3 ExoPlayer（带软解回退，解决 VideoView 硬解黑屏）。 */
+@OptIn(ExperimentalFoundationApi::class, ExperimentalLayoutApi::class)
+@Composable
+fun UrlVideo(url: String, modifier: Modifier = Modifier) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var localFile by remember { mutableStateOf<File?>(null) }
+
+    // ExoPlayer 实例，DisposableEffect 释放
+    val exoPlayer = remember {
+        androidx.media3.exoplayer.ExoPlayer.Builder(context).build().apply {
+            setMediaItem(androidx.media3.common.MediaItem.fromUri(url))
+            prepare()
+        }
+    }
+    DisposableEffect(Unit) {
+        onDispose { exoPlayer.release() }
+    }
+
+    // 下载缓存（供长按保存 + 播放同一份文件）
+    LaunchedEffect(url) {
+        if (url.startsWith("http://") || url.startsWith("https://")) {
+            withContext(Dispatchers.IO) {
+                try {
+                    val dir = File(context.cacheDir, "web-video").apply { mkdirs() }
+                    val file = File(dir, "${java.util.UUID.randomUUID()}.mp4")
+                    val client = okhttp3.OkHttpClient()
+                    val request = okhttp3.Request.Builder().url(url)
+                        .header("User-Agent", "Mozilla/5.0")
+                        .build()
+                    client.newCall(request).execute().use { resp ->
+                        if (!resp.isSuccessful) {
+                            android.util.Log.e("VideoPlayer", "视频下载失败 HTTP=${resp.code} type=${resp.header("Content-Type")}")
+                            return@withContext
+                        }
+                        val bytes = resp.body?.bytes() ?: return@withContext
+                        val sha = MessageDigest.getInstance("SHA-256").digest(bytes)
+                            .joinToString("") { "%02x".format(it) }
+                        val header = bytes.take(16).joinToString(" ") { "%02x".format(it) }
+                        android.util.Log.i("VideoPlayer", "视频下载: type=${resp.header("Content-Type")} bytes=${bytes.size} header=$header sha256=$sha")
+                        file.outputStream().use { it.write(bytes) }
+                    }
+                    localFile = file
+                    android.util.Log.i("VideoPlayer", "视频已缓存到 ${file.absolutePath} size=${file.length()}")
+                } catch (e: Exception) {
+                    android.util.Log.e("VideoPlayer", "视频缓存失败: ${e.message}")
+                }
+            }
+        }
+    }
+
+    // ExoPlayer 播放器：支持软解回退，画面正常渲染
+    Box(
+        modifier = modifier
+            .fillMaxWidth()
+            .heightIn(min = 200.dp, max = 400.dp)
+            .background(Color.Black)
+            .combinedClickable(
+                onClick = {
+                    if (exoPlayer.isPlaying) exoPlayer.pause() else exoPlayer.play()
+                },
+                onLongClick = {
+                    scope.launch {
+                        Toast.makeText(context, "正在保存视频…", Toast.LENGTH_SHORT).show()
+                        val bytes = localFile?.takeIf { it.exists() }?.readBytes()
+                            ?: fetchImageBytes(context, url)
+                        if (bytes != null) {
+                            val sha = MessageDigest.getInstance("SHA-256").digest(bytes)
+                                .joinToString("") { "%02x".format(it) }
+                            android.util.Log.i("VideoPlayer", "保存视频: bytes=${bytes.size} sha256=$sha source=${if (localFile != null) "local-cache" else "remote"}")
+                            val ok = saveVideoToGallery(context, bytes)
+                            Toast.makeText(context, if (ok) "视频已保存到相册" else "保存失败", Toast.LENGTH_SHORT).show()
+                        } else {
+                            Toast.makeText(context, "视频获取失败", Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                }
+            )
+    ) {
+        androidx.media3.ui.compose.material3.Player(
+            player = exoPlayer,
+            modifier = Modifier.fillMaxSize(),
+        )
+    }
+}
+
 /** 获取图片原始字节（data:image / content:// / http 三种来源，含会话 Cookie 与本地网关鉴权）。 */
 private suspend fun fetchImageBytes(context: Context, url: String): ByteArray? = withContext(Dispatchers.IO) {
     try {
@@ -1410,6 +1823,9 @@ private suspend fun fetchImageBytes(context: Context, url: String): ByteArray? =
                 return@withContext input.readBytes()
             }
             return@withContext null
+        }
+        if (url.startsWith("file://")) {
+            return@withContext runCatching { File(Uri.parse(url).path.orEmpty()).readBytes() }.getOrNull()
         }
         val cookieHeader = runCatching {
             CookieManager.getInstance().getCookie(url).orEmpty()
@@ -2001,7 +2417,13 @@ fun BrowserScreen(
                                         webViewRef.value?.let { view ->
                                             // 自定义 Web（longcat 等）同样去掉 UA 的 wv 标记，
                                             // 否则网页检测到 WebView 环境会禁用图生视频等上传功能。
-                                            view.settings.userAgentString = webLoginUserAgent(context, WebProviderType.CUSTOM_WEB, false)
+                                            // longcat 需要更彻底的 UA 伪装，否则发送按钮被禁用
+                                            val ua = if (item.loginUrl.contains("longcat.chat", ignoreCase = true)) {
+                                                "Mozilla/5.0 (Linux; Android 13; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
+                                            } else {
+                                                webLoginUserAgent(context, WebProviderType.CUSTOM_WEB, false)
+                                            }
+                                            view.settings.userAgentString = ua
                                             view.loadUrl(item.loginUrl)
                                         }
                                     },
@@ -2285,7 +2707,7 @@ fun BrowserScreen(
         }
         key(webViewGeneration) { AndroidView(
             factory = { ctx ->
-                WebView(ctx).apply {
+                TouchWebView(ctx).apply {
                     // 关键：AndroidView 默认给子 View 设 WRAP_CONTENT，WebView 在内容未布局前会塌成 0 高度导致空白。
                     // 必须显式 MATCH_PARENT 让其撑满父容器。
                     layoutParams = android.view.ViewGroup.LayoutParams(
@@ -2305,7 +2727,16 @@ fun BrowserScreen(
                     addJavascriptInterface(jsBridge, "MultiWebBridge")
                     settings.domStorageEnabled = true
                     settings.databaseEnabled = true
-                    settings.userAgentString = webLoginUserAgent(ctx, provider, compatibilityMode)
+                    WebView.setWebContentsDebuggingEnabled(true)
+                    settings.userAgentString = if (provider == WebProviderType.DOUBAO_WEB) {
+                        // 豆包会校验真实 WebView 指纹，保留系统 UA。
+                        webLoginUserAgent(ctx, provider, compatibilityMode)
+                    } else {
+                        // LongCat 等网页登录在 Android 12 WebView 96 下会因 ; wv
+                        // 禁用文字/图片/视频提交；必须在首次 load 前使用标准移动 Chrome UA。
+                        "Mozilla/5.0 (Linux; Android 13; Mobile) AppleWebKit/537.36 " +
+                            "(KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
+                    }
                     settings.cacheMode = WebSettings.LOAD_DEFAULT
                     settings.loadsImagesAutomatically = true
                     // 按设备宽度渲染，避免桌面宽版面只显示左上角、无法左右移动
@@ -2316,23 +2747,34 @@ fun BrowserScreen(
                     settings.displayZoomControls = false
                     settings.mixedContentMode =
                         android.webkit.WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
-                    // 长按网页图片 → 保存到相册（先 OkHttp 直下，失效则从 WebView 缓存提取字节）
+                    // 长按网页图片/视频 → 保存到相册（先 OkHttp 直下，失效则从 WebView 缓存提取字节）
                     setOnLongClickListener {
                         val ht = hitTestResult
                         val isImage = ht != null && (
                             ht.type == android.webkit.WebView.HitTestResult.IMAGE_TYPE ||
                                 ht.type == android.webkit.WebView.HitTestResult.SRC_IMAGE_ANCHOR_TYPE
                             ) && !ht.extra.isNullOrBlank()
-                        if (isImage) {
-                            val imgUrl = ht.extra!!
+                        // 视频：链接指向 mp4/webm/mov/mkv 等，或 extra 以视频扩展名结尾
+                        val isVideoUrl = ht != null && !ht.extra.isNullOrBlank() &&
+                            Regex("\\.(mp4|webm|mov|mkv|m4v)(\\?.*)?$", RegexOption.IGNORE_CASE).containsMatchIn(ht.extra!!)
+                        if (isImage || isVideoUrl) {
+                            val mediaUrl = ht.extra!!
                             browserScope.launch {
-                                toast = "正在保存图片…"
-                                val bytes = fetchWebViewImageBytes(context, imgUrl)
+                                toast = if (isVideoUrl) "正在保存视频…" else "正在保存图片…"
+                                val bytes = fetchWebViewImageBytes(context, mediaUrl)
                                 if (bytes != null) {
-                                    val ok = saveImageToGallery(context, bytes)
-                                    toast = if (ok) "已保存到相册" else "图片保存失败"
+                                    val ok = if (isVideoUrl || isVideoBytes(bytes)) {
+                                        saveVideoToGallery(context, bytes)
+                                    } else {
+                                        saveImageToGallery(context, bytes)
+                                    }
+                                    toast = when {
+                                        ok && isVideoUrl -> "视频已保存到相册"
+                                        ok -> "已保存到相册"
+                                        else -> "保存失败"
+                                    }
                                 } else {
-                                    toast = "图片链接已失效，且本地无缓存，请重新生成后保存"
+                                    toast = "媒体链接已失效，且本地无缓存，请重新生成后保存"
                                 }
                             }
                             true
@@ -2426,6 +2868,7 @@ fun BrowserScreen(
                                 ) {
                                     com.wenwei.deepseekproxy.proxy.CustomWebChatAutomation.detach(view)
                                     com.wenwei.deepseekproxy.proxy.CustomWebImageAutomation.detach(view)
+                                    com.wenwei.deepseekproxy.proxy.CustomWebVideoAutomation.detach(view)
                                 }
                                 if (!urlStr.orEmpty().contains("chatgpt.com", ignoreCase = true)) {
                                     com.wenwei.deepseekproxy.proxy.ChatGptWebChatAutomation.detach(view)
@@ -2443,6 +2886,7 @@ fun BrowserScreen(
                                 ) {
                                     com.wenwei.deepseekproxy.proxy.CustomWebChatAutomation.detach(view)
                                     com.wenwei.deepseekproxy.proxy.CustomWebImageAutomation.detach(view)
+                                    com.wenwei.deepseekproxy.proxy.CustomWebVideoAutomation.detach(view)
                                 }
                             }
                         }
@@ -2480,8 +2924,39 @@ fun BrowserScreen(
                                 }?.let {
                                     com.wenwei.deepseekproxy.proxy.CustomWebChatAutomation.attach(view, it.id)
                                     com.wenwei.deepseekproxy.proxy.CustomWebImageAutomation.attach(view, it.id)
+                                    com.wenwei.deepseekproxy.proxy.CustomWebVideoAutomation.attach(view, it.id)
                                     // 常驻拦截"暂无权限访问"类 toast（LongCat 等网页加载时闪出）
                                     com.wenwei.deepseekproxy.proxy.CustomWebChatAutomation.armPermissionToastBlocker(view)
+                                    // longcat 聊天模式发送按钮被锁，强制解锁
+                                    if (urlStr?.contains("longcat.chat", ignoreCase = true) == true) {
+                                        view.postDelayed({
+                                            view.evaluateJavascript("""
+                                                (()=>{try{
+                                                  if(window.__multiwebSendUnlocker)return'dup';
+                                                  const enable=()=>{
+                                                    const b=document.querySelector('.send-btn');
+                                                    const e=document.querySelector('[contenteditable][role="textbox"]');
+                                                    if(!b||!e)return;
+                                                    const has=(e.innerText||'').trim().length>0;
+                                                    if(has){
+                                                      b.disabled=false;
+                                                      b.removeAttribute('aria-disabled');
+                                                      b.classList.remove('send-btn-disabled');
+                                                      b.style.opacity='1';
+                                                      b.style.pointerEvents='auto';
+                                                      b.style.cursor='pointer';
+                                                      // 保留网页原生触摸/点击链路，不注入 b.click()，避免破坏 Vue 的 trusted event 判断
+                                                    }
+                                                  };
+                                                  enable();
+                                                  const mo=new MutationObserver(enable);
+                                                  mo.observe(document.documentElement||document.body,{childList:true,subtree:true,characterData:true});
+                                                  window.__multiwebSendUnlocker=mo;
+                                                  return'unlocked';
+                                                }catch(e){return String(e)}})()
+                                            """.trimIndent(), null)
+                                        }, 1500)
+                                    }
                                     currentRelayReadyCallback()
                                 }
                             }
@@ -2546,6 +3021,7 @@ fun BrowserScreen(
                             fileChooserParams: FileChooserParams?
                         ): Boolean {
                             if (filePathCallback == null) return false
+                            android.util.Log.i("NativeWeb", "WebChromeClient.onShowFileChooser")
                             val activity = context as? MainActivity ?: return false
                             activity.openWebFileChooser(filePathCallback)
                             return true
@@ -2609,6 +3085,7 @@ fun BrowserScreen(
             onRelease = {
                 com.wenwei.deepseekproxy.proxy.CustomWebChatAutomation.detach(it)
                 com.wenwei.deepseekproxy.proxy.CustomWebImageAutomation.detach(it)
+                com.wenwei.deepseekproxy.proxy.CustomWebVideoAutomation.detach(it)
                 com.wenwei.deepseekproxy.proxy.GeminiWebChatAutomation.detach(it)
                 com.wenwei.deepseekproxy.proxy.GeminiWebImageAutomation.detach(it)
                 com.wenwei.deepseekproxy.proxy.ChatGptWebChatAutomation.detach(it)

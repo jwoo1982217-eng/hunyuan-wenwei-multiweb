@@ -15,6 +15,7 @@ import io.ktor.utils.io.ByteWriteChannel
 import io.ktor.utils.io.writeFully
 import io.ktor.util.AttributeKey
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.sync.Mutex
@@ -150,7 +151,7 @@ data class ModelListResponse(
 )
 
 internal fun discoverableWebRelayModels(models: List<ProviderModel>): List<ProviderModel> =
-    models.filter { it.enabled && it.providerType != WebProviderType.OPENAI_COMPATIBLE }
+    models.filter { it.enabled }
 
 internal enum class CompatibilityProxyRequestKind {
     CHAT,
@@ -304,18 +305,13 @@ object ProxyServer {
                     if (!call.requireLocalGatewayAuth()) return@get
                     call.respond(currentStatus())
                 }
-                get("/v1/models") {
-                    if (!call.requireLocalGatewayAuth()) return@get
-                    // Model discovery must not depend on an invocation that can only
-                    // happen after the client has discovered the model id. This local
-                    // endpoint is specifically the web-to-API catalog; ordinary
-                    // OpenAI-compatible upstreams configured on the "接口" screen are
-                    // intentionally excluded to keep client model lists uncluttered.
-                    // Detailed runtime readiness remains available from /v1/status.
-                    call.respond(ModelListResponse(data = discoverableWebRelayModels(
+                suspend fun ApplicationCall.respondModelList() {
+                    if (!requireLocalGatewayAuth()) return
+                    // 同时兼容 OpenAI 标准 /v1/models 与部分客户端使用的 /models。
+                    // 返回全部已启用模型，包括「接口」tab 配置的 OpenAI Compatible API 模型。
+                    respond(ModelListResponse(data = discoverableWebRelayModels(
                         ProviderCatalog.enabledModels
-                    )
-                        .map { model ->
+                    ).map { model ->
                         ModelListItem(
                             id = model.publicModelId,
                             owned_by = model.providerType.name.lowercase(),
@@ -324,6 +320,8 @@ object ProxyServer {
                         )
                     }))
                 }
+                get("/v1/models") { call.respondModelList() }
+                get("/models") { call.respondModelList() }
                 post("/v1/chat/completions") {
                     if (!call.requireLocalGatewayAuth()) return@post
                     handleChatCompletions()
@@ -332,6 +330,11 @@ object ProxyServer {
                 post("/v1/images/generations") {
                     if (!call.requireLocalGatewayAuth()) return@post
                     handleImageGen()
+                    call.recordRequestedModelHealth()
+                }
+                post("/v1/videos/generations") {
+                    if (!call.requireLocalGatewayAuth()) return@post
+                    handleVideoGen()
                     call.recordRequestedModelHealth()
                 }
                 // 墨听等通用客户端可能把 GET /v1/models 的发现地址保存成 CUSTOM
@@ -529,10 +532,6 @@ object ProxyServer {
                 handleKimiChat(req, completionId, created, WebProviderType.KIMI_WEB)
                 return
             }
-            if (registeredModel.providerType == WebProviderType.DEEPSEEK_WEB) {
-                handleDeepSeekChat(req, completionId, created)
-                return
-            }
             if (registeredModel.providerType == WebProviderType.QWEN_WEB) {
                 handleQwenChat(registeredModel, req, completionId, created)
                 return
@@ -686,7 +685,7 @@ object ProxyServer {
 
     private fun deepSeekPrompt(messages: List<ChatMessage>): String = messages
         .filter { it.textContent().isNotBlank() }
-        .joinToString("\n\n") { "[${it.role}]: ${it.textContent()}" }
+        .joinToString("\n\n") { it.textContent() }
 
     private suspend fun RoutingContext.handleDeepSeekChat(
         req: ChatCompletionRequest,
@@ -710,13 +709,27 @@ object ProxyServer {
                     DeepSeekClient.token = authorization
                     val sessionId = DeepSeekClient.createSession()
                     try {
+                        // 提取图片附件并上传（识图）：带图消息的图片经 uploadImage 拿 file_id，传 completion 的 ref_file_ids
+                        val refFileIds = req.messages.flatMap { it.attachments() }
+                            .filter { it.mime.startsWith("image/") }
+                            .mapNotNull { att ->
+                                runCatching {
+                                    val b64 = att.dataUrl.substringAfter("base64,", "")
+                                    val bytes = android.util.Base64.decode(b64, android.util.Base64.NO_WRAP)
+                                    DeepSeekClient.uploadImage(bytes, att.name)
+                                }.getOrNull()
+                            }
                         val challenge = DeepSeekClient.createPowChallenge("/api/v0/chat/completion")
                         val answer = DeepSeekPow.solve(
                             challenge.challenge, challenge.salt, challenge.expireAt, challenge.difficulty
                         )
                         val pow = DeepSeekClient.buildPowHeader(challenge, answer, "/api/v0/chat/completion")
-                        val modelType = if (req.model.contains("reasoner", true)) "expert" else "default"
-                        DeepSeekClient.chatCompletion(sessionId, prompt, pow, modelType).use { response ->
+                        val modelType: String? = when {
+                            refFileIds.isNotEmpty() -> null  // 识图：网页端 model_type=null
+                            req.model.contains("reasoner", true) -> "expert"
+                            else -> "default"
+                        }
+                        DeepSeekClient.chatCompletion(sessionId, prompt, pow, modelType, refFileIds).use { response ->
                             DeepSeekClient.parseSse(response.body!!.source(), emit)
                         }
                     } finally {
@@ -815,6 +828,7 @@ object ProxyServer {
         completionId: String,
         created: Int,
     ) {
+        android.util.Log.i("BrowserRelayRoute", "进入浏览器中转: provider=${model.providerType}, model=${model.publicModelId}, attachments=${req.messages.sumOf { it.attachments().size }}")
         val config = builtInBrowserRelayConfig(model.providerType)
         respondProviderText(req, completionId, created) { emit ->
             var previous = ""
@@ -1344,10 +1358,30 @@ object ProxyServer {
     private suspend fun RoutingContext.handleImageGen(rawRequestOverride: String? = null) {
         try {
             val raw = rawRequestOverride ?: call.receiveText()
-            val o = org.json.JSONObject(raw)
+            if (raw.isBlank()) {
+                call.respond(HttpStatusCode.BadRequest, mapOf("error" to mapOf(
+                    "type" to "invalid_request_error",
+                    "code" to "empty_request_body",
+                    "message" to "Image generation request body is empty"
+                )))
+                return
+            }
+            val o = runCatching { org.json.JSONObject(raw) }.getOrElse {
+                call.respond(HttpStatusCode.BadRequest, mapOf("error" to mapOf(
+                    "type" to "invalid_request_error",
+                    "code" to "invalid_json",
+                    "message" to "Image generation request body is invalid JSON"
+                )))
+                return
+            }
             val prompt = o.optString("prompt", "")
             val size = o.optString("size", "")
-            val modelId = o.optString("model", "doubao-image-web")
+            val modelIdFromRequest = o.optString("model", "")
+            if (modelIdFromRequest.isBlank()) {
+                android.util.Log.e("ImageRoute", "生图请求缺少 model 字段！完整body: $raw")
+            }
+            val modelId = if (modelIdFromRequest.isNotBlank()) modelIdFromRequest else "doubao-image-web"
+            android.util.Log.i("ImageRoute", "接收到生图请求: model=$modelId (原始=$modelIdFromRequest), prompt前30=${prompt.take(30)}, 完整body前200=${raw.take(200)}")
             call.attributes.put(RequestedModelKey, modelId)
             val registered = ProviderCatalog.find(modelId)
             if (registered == null || ProviderCapability.IMAGE_GENERATION !in registered.capabilities) {
@@ -1490,7 +1524,18 @@ object ProxyServer {
                 }
                 try {
                     val ratio = resolveRatio(if (size.isNotBlank()) size else defaultImageSize)
-                    val urls = CustomWebImageAutomation.generateImage(config, prompt, ratio)
+                    val refImages = o.optJSONArray("image_data")?.let { arr ->
+                        (0 until arr.length()).mapNotNull { i ->
+                            val item = arr.optJSONObject(i) ?: return@mapNotNull null
+                            val b64 = item.optString("data", "")
+                            if (b64.isBlank()) null else ChatAttachment(
+                                name = item.optString("name", "ref.png"),
+                                mime = item.optString("mime", "image/png"),
+                                dataUrl = "data:${item.optString("mime", "image/png")};base64,$b64"
+                            )
+                        }
+                    } ?: emptyList()
+                    val urls = CustomWebImageAutomation.generateImage(config, prompt, ratio, refImages)
                     call.respond(ImageGenResponse(
                         created = (System.currentTimeMillis() / 1000).toInt(),
                         data = urls.map(::ImageDataItem)
@@ -1507,11 +1552,29 @@ object ProxyServer {
             // 外部指定且可识别 → 用之；否则用设置界面尺寸；再不行兜底 9:16 竖版
             val ratio = resolveRatio(if (size.isNotBlank()) size else defaultImageSize)
             val cookies = DoubaoClient.parseCookie(nextCookie())
-            LogStore.i("Doubao", "调用生图，prompt=${prompt.take(60)} ratio=$ratio")
+            // 参考图（图生图）：从 image_data 提取 base64 图片
+            val refImages = runCatching {
+                val imageDataArray = o.optJSONArray("image_data")
+                if (imageDataArray == null || imageDataArray.length() == 0) emptyList()
+                else (0 until imageDataArray.length()).mapNotNull { i ->
+                    val item = imageDataArray.optJSONObject(i) ?: return@mapNotNull null
+                    val b64 = item.optString("data", "")
+                    if (b64.isBlank()) return@mapNotNull null
+                    val bytes = android.util.Base64.decode(b64, android.util.Base64.NO_WRAP)
+                    DoubaoClient.RefImage(
+                        name = item.optString("name", "ref.png"),
+                        bytes = bytes,
+                        width = item.optInt("width", 0),
+                        height = item.optInt("height", 0),
+                        mime = item.optString("mime", "image/png")
+                    )
+                }
+            }.onFailure { LogStore.e("Doubao", "参考图提取失败: ${it.message}") }.getOrDefault(emptyList())
+            LogStore.i("Doubao", "调用生图，prompt=${prompt.take(60)} ratio=$ratio 参考图=${refImages.size}")
 
             val (result, errMsg) = withContext(Dispatchers.IO) {
                 try {
-                    DoubaoClient.generateImage(prompt, cookies, ratio) to null
+                    DoubaoClient.generateImage(prompt, cookies, ratio, refImages) to null
                 } catch (e: Exception) {
                     LogStore.e("Doubao", "生图异常: ${e.stackTraceToString()}")
                     null to (e.localizedMessage ?: e.toString())
@@ -1536,6 +1599,295 @@ object ProxyServer {
             )
         } catch (e: Exception) {
             LogStore.e("Doubao", "生图处理失败: ${e.stackTraceToString()}")
+            if (!call.response.isSent) {
+                try {
+                    call.respond(
+                        HttpStatusCode.InternalServerError,
+                        mapOf("error" to (e.localizedMessage ?: e.toString()))
+                    )
+                } catch (_: Exception) {
+                }
+            }
+        }
+    }
+
+    /** 视频生成：仅支持 CUSTOM_WEB（WebView 驱动），原生 API 暂未接入。 */
+    private suspend fun RoutingContext.handleVideoGen() {
+        try {
+            val raw = call.receiveText()
+            if (raw.isBlank()) {
+                call.respond(HttpStatusCode.BadRequest, mapOf("error" to mapOf(
+                    "type" to "invalid_request_error",
+                    "code" to "empty_request_body",
+                    "message" to "Video generation request body is empty"
+                )))
+                return
+            }
+            val o = runCatching { org.json.JSONObject(raw) }.getOrElse {
+                call.respond(HttpStatusCode.BadRequest, mapOf("error" to mapOf(
+                    "type" to "invalid_request_error",
+                    "code" to "invalid_json",
+                    "message" to "Video generation request body is invalid JSON"
+                )))
+                return
+            }
+            val prompt = o.optString("prompt", "")
+            val modelId = o.optString("model", "")
+            call.attributes.put(RequestedModelKey, modelId)
+            val registered = ProviderCatalog.find(modelId)
+            if (registered == null) {
+                call.respond(HttpStatusCode.BadRequest, mapOf("error" to mapOf(
+                    "type" to "invalid_model", "code" to "unknown_video_model",
+                    "message" to "Unknown video model: $modelId"
+                )))
+                return
+            }
+            if (ProviderCapability.VIDEO_GENERATION !in registered.capabilities) {
+                call.respond(HttpStatusCode.BadRequest, mapOf("error" to mapOf(
+                    "type" to "invalid_model", "code" to "not_video_model",
+                    "message" to "模型 $modelId 不是视频模型"
+                )))
+                return
+            }
+            LogStore.i("VideoRoute", "$modelId → ${registered.providerType.name}/${registered.accountId.orEmpty()}")
+            if (registered.providerType == WebProviderType.OPENAI_COMPATIBLE) {
+                val candidates = if (registered.accountId == "auto") {
+                    ApiRouteSelector.rank(ApiProviderRegistry.candidates(registered.upstreamModelId, image = false))
+                } else {
+                    listOfNotNull(ApiProviderRegistry.find(registered.accountId)).filter { it.enabled }
+                }
+                if (candidates.isEmpty()) {
+                    call.respond(HttpStatusCode.ServiceUnavailable, mapOf("error" to "API provider is unavailable"))
+                    return
+                }
+                var response: okhttp3.Response? = null
+                var selectedConfig: ApiProviderConfig? = null
+                var lastError = "所有同名视频线路均不可用"
+                for (config in candidates) {
+                    val startedAt = System.nanoTime()
+                    try {
+                        val attempt = withContext(Dispatchers.IO) {
+                            OpenAiCompatibleClient.executeVideo(config, registered.upstreamModelId, raw)
+                        }
+                        val latency = (System.nanoTime() - startedAt) / 1_000_000
+                        val retryable = attempt.code == 429 || attempt.code >= 500
+                        ApiRouteSelector.record(config.id, attempt.isSuccessful, latency, retryable)
+                        if (attempt.isSuccessful || !retryable || config == candidates.last()) {
+                            response = attempt
+                            selectedConfig = config
+                            LogStore.i("AutoRoute", "视频 ${registered.upstreamModelId} → ${config.name} (${latency}ms)")
+                            break
+                        }
+                        lastError = "${config.name}: HTTP ${attempt.code}"
+                        attempt.close()
+                    } catch (e: Exception) {
+                        val latency = (System.nanoTime() - startedAt) / 1_000_000
+                        ApiRouteSelector.record(config.id, false, latency)
+                        lastError = "${config.name}: ${e.message ?: e.javaClass.simpleName}"
+                    }
+                }
+                val selected = response
+                if (selected == null) {
+                    call.respond(HttpStatusCode.BadGateway, mapOf("error" to mapOf(
+                        "type" to "all_routes_failed", "message" to lastError
+                    )))
+                    return
+                }
+                selected.use { resp ->
+                    val body = resp.body?.string().orEmpty()
+                    val json = runCatching { org.json.JSONObject(body) }.getOrNull()
+                    if (json == null) {
+                        call.respondText(body, ContentType.parse("application/json"), HttpStatusCode.fromValue(resp.code))
+                        return
+                    }
+                    val cfg = selectedConfig ?: return
+                    val isZhipu = cfg.baseUrl.contains("bigmodel.cn", ignoreCase = true)
+                    // 异步任务检测：Agnes 用 status 字段，智谱用 task_status
+                    val statusField = if (isZhipu) "task_status" else "status"
+                    val initialStatus = json.optString(statusField, "")
+                    val isAsync = if (isZhipu) initialStatus == "PROCESSING" else initialStatus in setOf("queued", "processing", "in_progress")
+                    if (isAsync) {
+                        // 任务 ID：优先 video_id（Agnes），其次 id（智谱）
+                        val taskId = json.optString("video_id", "")
+                            .ifBlank { json.optString("id", json.optString("task_id", "")) }
+                        if (taskId.isBlank()) {
+                            call.respondText(body, ContentType.parse("application/json"), HttpStatusCode.fromValue(resp.code))
+                            return
+                        }
+                        android.util.Log.i("VideoRoute", "异步视频任务 $taskId (${if (isZhipu) "Zhipu" else "Agnes"})，开始轮询...")
+                        val deadline = System.currentTimeMillis() + 300_000
+                        var videoUrl: String? = null
+                        while (System.currentTimeMillis() < deadline) {
+                            delay(3_000)
+                            val pollResp = withContext(Dispatchers.IO) {
+                                val client = okhttp3.OkHttpClient()
+                                val pollUrl = if (isZhipu) {
+                                    "${cfg.normalizedBaseUrl().trimEnd('/')}/async-result/$taskId"
+                                } else {
+                                    OpenAiCompatibleClient.endpoint(cfg, "videos/$taskId")
+                                }
+                                client.newCall(okhttp3.Request.Builder()
+                                    .url(pollUrl)
+                                    .header("Authorization", "Bearer ${cfg.apiKey}")
+                                    .get().build()).execute()
+                            }
+                            val pollBody = pollResp.body?.string().orEmpty()
+                            pollResp.close()
+                            val pollJson = runCatching { org.json.JSONObject(pollBody) }.getOrNull()
+                            val pollStatus = (pollJson?.optString(statusField, "") ?: "")
+                                .ifBlank { pollJson?.optString("internal_status", "") ?: "" }
+                            android.util.Log.i("VideoRoute", "轮询 $taskId → $statusField/internal_status=$pollStatus")
+                            // 完成检测
+                            val completed = if (isZhipu) pollStatus == "SUCCESS" else pollStatus == "completed" || pollStatus == "succeeded"
+                            if (completed) {
+                                android.util.Log.i("VideoRoute", "轮询完成! 响应体前500=${pollBody.take(500)}")
+                                videoUrl = if (isZhipu) {
+                                    pollJson?.optJSONArray("video_result")?.optJSONObject(0)?.optString("url", "")?.takeIf { it.isNotBlank() }
+                                } else {
+                                    (pollJson?.optString("remixed_from_video_id", "") ?: "")
+                                        .ifBlank { pollJson?.optJSONObject("metadata")?.optString("url", "") ?: "" }
+                                        .ifBlank { pollJson?.optString("video_url", "") ?: "" }
+                                }
+                                if (!videoUrl.isNullOrBlank()) break
+                            }
+                            // 失败检测
+                            val failed = if (isZhipu) pollStatus == "FAIL" else pollStatus == "failed" || pollStatus == "error"
+                            if (failed) {
+                                val err = pollJson?.optString("error", pollJson?.optString("message", "")) ?: "unknown"
+                                call.respond(HttpStatusCode.BadGateway, mapOf("error" to "视频生成失败: $err"))
+                                return
+                            }
+                        }
+                        if (videoUrl.isNullOrBlank()) {
+                            call.respond(HttpStatusCode.BadGateway, mapOf("error" to "视频生成超时"))
+                            return
+                        }
+                        val wrapped = org.json.JSONObject().apply {
+                            put("data", org.json.JSONArray().apply {
+                                put(org.json.JSONObject().apply { put("url", videoUrl) })
+                            })
+                        }
+                        call.respondText(wrapped.toString(), ContentType.parse("application/json"), HttpStatusCode.OK)
+                        return
+                    }
+                    // 同步响应：直接透传
+                    call.respondText(body, ContentType.parse(resp.header("Content-Type") ?: "application/json"), HttpStatusCode.fromValue(resp.code))
+                }
+                return
+            }
+            if (registered.providerType == WebProviderType.DOUBAO_WEB) {
+                val prompt = o.optString("prompt", "")
+                if (prompt.isBlank()) {
+                    call.respond(HttpStatusCode.BadRequest, mapOf("error" to mapOf(
+                        "type" to "invalid_request", "message" to "prompt 不能为空"
+                    )))
+                    return
+                }
+                val refImages = o.optJSONArray("image_data")?.let { arr ->
+                    (0 until arr.length()).mapNotNull { i ->
+                        val item = arr.optJSONObject(i) ?: return@mapNotNull null
+                        val b64 = item.optString("data", "")
+                        if (b64.isBlank()) null else ChatAttachment(
+                            name = item.optString("name", "ref.png"),
+                            mime = item.optString("mime", "image/png"),
+                            dataUrl = "data:${item.optString("mime", "image/png")};base64,$b64"
+                        )
+                    }
+                } ?: emptyList()
+                LogStore.i("VideoRoute", "豆包视频 prompt=${prompt.take(40)} 参考图=${refImages.size}")
+                val debugFile = java.io.File("/data/data/com.wenwei.deepseekproxy.multiweb/files/doubao_video_debug.txt")
+                try {
+                    debugFile.writeText("", java.nio.charset.StandardCharsets.UTF_8)
+                } catch (_: Exception) {}
+                try {
+                    val cookies = DoubaoClient.parseCookie(nextCookie())
+                    val uploadedRefs = refImages.map { att ->
+                        val ext = when {
+                            att.mime.contains("png", ignoreCase = true) -> "png"
+                            att.mime.contains("webp", ignoreCase = true) -> "webp"
+                            else -> "jpeg"
+                        }
+                        val bytes = runCatching { android.util.Base64.decode(att.dataUrl.substringAfter("base64,"), android.util.Base64.DEFAULT) }.getOrElse { ByteArray(0) }
+                        DoubaoClient.RefImage(att.name, bytes, mime = att.mime)
+                    }
+                    val startedAt = System.nanoTime()
+                    val result = DoubaoClient.generateVideo(prompt, cookies, ratio = null, refImages = uploadedRefs)
+                    val latency = (System.nanoTime() - startedAt) / 1_000_000
+                    LogStore.i("VideoRoute", "豆包视频完成 urls=${result.videoUrls} latency=${latency}ms raw_len=${result.raw?.length ?: 0}")
+                    try {
+                        debugFile.writeText(org.json.JSONObject().apply {
+                            put("prompt", prompt)
+                            put("model", registered.publicModelId)
+                            put("refs", refImages.size)
+                            put("latency_ms", latency)
+                            put("videoUrls", org.json.JSONArray(result.videoUrls))
+                            put("raw", result.raw ?: "")
+                        }.toString(), java.nio.charset.StandardCharsets.UTF_8)
+                    } catch (_: Exception) {}
+                    if (result.videoUrls.isEmpty()) {
+                        call.respond(HttpStatusCode.BadGateway, mapOf("error" to mapOf(
+                            "type" to "video_parse_failed",
+                            "message" to "未从豆包响应中解析到视频 URL（请查看 App 日志）"
+                        )))
+                        return
+                    }
+                    call.respond(ImageGenResponse(
+                        created = (System.currentTimeMillis() / 1000).toInt(),
+                        data = result.videoUrls.map { ImageDataItem(it) }
+                    ))
+                } catch (e: Exception) {
+                    LogStore.e("VideoRoute", "豆包视频异常: ${e.stackTraceToString()}")
+                    call.respond(HttpStatusCode.BadGateway, mapOf("error" to mapOf(
+                        "type" to "doubao_video_error",
+                        "message" to (e.localizedMessage ?: e.toString()).take(200)
+                    )))
+                }
+                return
+            }
+            if (registered.providerType != WebProviderType.CUSTOM_WEB) {
+                call.respond(HttpStatusCode.BadRequest, mapOf("error" to mapOf(
+                    "type" to "unsupported_provider",
+                    "message" to "视频生成目前仅支持自定义 Web（WebView 驱动）供应商"
+                )))
+                return
+            }
+            val config = CustomWebProviderRegistry.find(registered.accountId)
+            if (config == null) {
+                call.respond(HttpStatusCode.ServiceUnavailable, mapOf("error" to "自定义 Web 视频配置不存在"))
+                return
+            }
+            try {
+                // 提取参考图（图生视频）：与生图 image_data 相同格式
+                val refImages = o.optJSONArray("image_data")?.let { arr ->
+                    (0 until arr.length()).mapNotNull { i ->
+                        val item = arr.optJSONObject(i) ?: return@mapNotNull null
+                        val b64 = item.optString("data", "")
+                        if (b64.isBlank()) null else ChatAttachment(
+                            name = item.optString("name", "ref.png"),
+                            mime = item.optString("mime", "image/png"),
+                            dataUrl = "data:${item.optString("mime", "image/png")};base64,$b64"
+                        )
+                    }
+                } ?: emptyList()
+                LogStore.i("CustomWebVideo", "视频请求 prompt=${prompt.take(40)} 参考图=${refImages.size}")
+                val urls = CustomWebVideoAutomation.generateVideo(config, prompt, refImages)
+                if (urls.isEmpty()) {
+                    call.respond(HttpStatusCode.BadGateway, mapOf("error" to "网页未返回视频"))
+                    return
+                }
+                call.respond(ImageGenResponse(
+                    created = (System.currentTimeMillis() / 1000).toInt(),
+                    data = urls.map(::ImageDataItem)
+                ))
+            } catch (e: WebAutomationException) {
+                LogStore.e("CustomWebVideo", "${e.code}: ${e.message}")
+                call.respond(HttpStatusCode.ServiceUnavailable, mapOf("error" to mapOf(
+                    "type" to "webview_automation_error", "code" to e.code,
+                    "message" to (e.message ?: e.code)
+                )))
+            }
+        } catch (e: Exception) {
+            LogStore.e("CustomWebVideo", "视频生成处理失败: ${e.stackTraceToString()}")
             if (!call.response.isSent) {
                 try {
                     call.respond(

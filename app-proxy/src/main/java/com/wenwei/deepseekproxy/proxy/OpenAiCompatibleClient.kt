@@ -22,9 +22,10 @@ data class ApiTestResult(
     val message: String,
     val chatModels: List<String> = emptyList(),
     val imageModels: List<String> = emptyList(),
+    val videoModels: List<String> = emptyList(),
     val latencyMs: Long = 0L
 ) {
-    val models: List<String> get() = (chatModels + imageModels).distinct()
+    val models: List<String> get() = (chatModels + imageModels + videoModels).distinct()
 }
 
 object OpenAiCompatibleClient {
@@ -77,6 +78,7 @@ object OpenAiCompatibleClient {
         val data = Json.parseToJsonElement(body).jsonObject["data"]?.jsonArray.orEmpty()
         val chat = mutableListOf<String>()
         val images = mutableListOf<String>()
+        val videos = mutableListOf<String>()
         for (element in data) {
             val item = runCatching { element.jsonObject }.getOrNull() ?: continue
             val id = item["id"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
@@ -85,18 +87,26 @@ object OpenAiCompatibleClient {
             val explicitImage = listOf("image_generation", "image-generation", "text_to_image", "text-to-image")
                 .any(metadata::contains) || item["type"]?.jsonPrimitive?.contentOrNull.orEmpty()
                 .contains("image", ignoreCase = true)
+            val explicitVideo = listOf("video_generation", "video-generation", "text_to_video", "text-to-video")
+                .any(metadata::contains) || item["type"]?.jsonPrimitive?.contentOrNull.orEmpty()
+                .contains("video", ignoreCase = true)
             val explicitChat = listOf("chat.completions", "chat_completion", "text_generation", "text-generation")
                 .any(metadata::contains)
-            val imageById = IMAGE_MODEL_ID.containsMatchIn(id)
+            // 拆分规则：id 里含视频关键词（video/sora/kling/可灵/wan/t2v…）一律归视频，
+            // 含图片关键词（image/dall/flux/sdxl/draw/生图…）归生图，其余归聊天。
+            val videoById = VIDEO_MODEL_ID.containsMatchIn(id) || id.contains("video", ignoreCase = true)
+            val imageById = IMAGE_MODEL_ID.containsMatchIn(id) || id.contains("image", ignoreCase = true)
+            if (explicitVideo || videoById) videos += id
             if (explicitImage || imageById) images += id
-            if (explicitChat || (!explicitImage && !imageById)) chat += id
+            if (explicitChat || (!explicitVideo && !videoById && !explicitImage && !imageById)) chat += id
         }
-        val allCount = (chat + images).distinct().size
+        val allCount = (chat + images + videos).distinct().size
         return ApiTestResult(
             success = true,
-            message = "连接成功，发现 $allCount 个模型（聊天 ${chat.distinct().size}，生图 ${images.distinct().size}）",
+            message = "连接成功，发现 $allCount 个模型（聊天 ${chat.distinct().size}，生图 ${images.distinct().size}，视频 ${videos.distinct().size}）",
             chatModels = chat.distinct(),
-            imageModels = images.distinct()
+            imageModels = images.distinct(),
+            videoModels = videos.distinct()
         )
     }
 
@@ -121,11 +131,48 @@ object OpenAiCompatibleClient {
         RegexOption.IGNORE_CASE
     )
 
+    private val VIDEO_MODEL_ID = Regex(
+        "(^|[-_./])(video|sora|kling|wanx|wan[-_]?[0-9]|veo|runway|pika|gen[-_]?video|text[-_]?to[-_]?video|t2v|v2v|animate|mochi|cogvideo)([-_./]|$)",
+        RegexOption.IGNORE_CASE
+    )
+
     fun executeChat(config: ApiProviderConfig, upstreamModel: String, rawRequest: String): Response {
         val body = JSONObject(rawRequest).put("model", upstreamModel).toString()
         return client.newCall(Request.Builder().url(endpoint(config, "chat/completions"))
             .authorize(config).header("Content-Type", "application/json")
             .post(body.toRequestBody("application/json".toMediaType())).build()).execute()
+    }
+
+    fun executeVideo(config: ApiProviderConfig, upstreamModel: String, rawRequest: String): Response {
+        val jsonBody = JSONObject(rawRequest).apply {
+            put("model", upstreamModel)
+            // 智谱 cogvideox-flash 必需参数：size 用 WxH 格式，补全 duration/fps/with_audio
+            if (config.baseUrl.contains("bigmodel.cn", ignoreCase = true)) {
+                if (!has("size")) put("size", "720x1280")
+                if (!has("duration")) put("duration", 5)
+                if (!has("fps")) put("fps", 30)
+                if (!has("with_audio")) put("with_audio", false)
+            }
+        }
+        val path = if (config.baseUrl.contains("bigmodel.cn", ignoreCase = true)) "videos/generations" else "videos"
+        val url = if (config.baseUrl.contains("bigmodel.cn", ignoreCase = true)) {
+            "${config.normalizedBaseUrl()}/$path"
+        } else {
+            endpoint(config, path)
+        }
+        val response = client.newCall(Request.Builder().url(url)
+            .authorize(config).header("Content-Type", "application/json")
+            .post(jsonBody.toString().toRequestBody("application/json".toMediaType())).build()).execute()
+        val body = response.body?.string().orEmpty()
+        android.util.Log.i("VideoApi", "视频API响应 code=${response.code} body前500=${body.take(500)}")
+        return Response.Builder()
+            .request(response.request)
+            .protocol(response.protocol)
+            .code(response.code)
+            .message(response.message)
+            .headers(response.headers)
+            .body(body.toResponseBody("application/json".toMediaType()))
+            .build()
     }
 
     fun executeImage(config: ApiProviderConfig, upstreamModel: String, rawRequest: String): Response {

@@ -12,6 +12,7 @@ data class ApiProviderConfig(
     val apiKey: String,
     val chatModels: List<String> = emptyList(),
     val imageModels: List<String> = emptyList(),
+    val videoModels: List<String> = emptyList(),
     val enabled: Boolean = true
 ) {
     fun normalizedBaseUrl(): String = baseUrl.trim().trimEnd('/')
@@ -36,6 +37,7 @@ class ApiProviderStore(context: Context) {
                 apiKey = item.optString("apiKey").takeIf(String::isNotBlank)?.let(cipher::decrypt).orEmpty(),
                 chatModels = item.optJSONArray("chatModels").strings(),
                 imageModels = item.optJSONArray("imageModels").strings(),
+                videoModels = item.optJSONArray("videoModels").strings(),
                 enabled = item.optBoolean("enabled", true)
             )
         }
@@ -59,6 +61,7 @@ class ApiProviderStore(context: Context) {
             put("apiKey", config.apiKey.takeIf(String::isNotBlank)?.let(cipher::encrypt).orEmpty())
             put("chatModels", JSONArray(config.chatModels.distinct()))
             put("imageModels", JSONArray(config.imageModels.distinct()))
+            put("videoModels", JSONArray(config.videoModels.distinct()))
             put("enabled", config.enabled)
         }) }
         prefs.edit().putString(KEY, array.toString()).apply()

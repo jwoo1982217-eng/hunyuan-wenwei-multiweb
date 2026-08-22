@@ -98,10 +98,58 @@ object DoubaoClient {
 
     // ── 聊天 payload（桌面客户端协议）─────────────────────────
     private fun buildCompletionPayload(text: String, needDeepThink: Int, images: List<DoubaoUploadedImage>): String {
-        val blocks = JSONArray()
+        // 构建 messages 数组
+        // 豆包网页识图：图片和文本必须发成两条独立消息（与网页端实测一致），
+        // 不能合在一条消息里（合一条豆包只当纯文本处理，不识别图片）。
+        val messages = JSONArray()
 
-        // 文本块
-        blocks.put(JSONObject().apply {
+        if (images.isNotEmpty()) {
+            // 消息 1：图片（block_type=10052，attachment_block）
+            val attachments = JSONArray()
+            for (img in images) {
+                attachments.put(JSONObject().apply {
+                    put("type", 1)
+                    put("identifier", uuid())
+                    put("image", JSONObject().apply {
+                        put("name", img.name)
+                        put("uri", img.uri)
+                        put("image_ori", JSONObject().apply {
+                            put("url", "")
+                            put("width", img.width)
+                            put("height", img.height)
+                            put("format", "")
+                            put("url_formats", JSONObject())
+                        })
+                    })
+                    put("parse_state", 0)
+                    put("review_state", 1)
+                    put("upload_status", 1)
+                    put("progress", 100)
+                    put("src", "")
+                })
+            }
+            val imgBlock = JSONObject().apply {
+                put("block_type", 10052)
+                put("content", JSONObject().apply {
+                    put("attachment_block", JSONObject().apply {
+                        put("attachments", attachments)
+                    })
+                    put("pc_event_block", "")
+                })
+                put("block_id", uuid())
+                put("parent_id", "")
+                put("meta_info", JSONArray())
+                put("append_fields", JSONArray())
+            }
+            messages.put(JSONObject().apply {
+                put("local_message_id", uuid())
+                put("content_block", JSONArray().apply { put(imgBlock) })
+                put("message_status", 0)
+            })
+        }
+
+        // 消息 2：文本（block_type=10000，text_block）
+        val textBlock = JSONObject().apply {
             put("block_type", 10000)
             put("content", JSONObject().apply {
                 put("text_block", JSONObject().apply {
@@ -118,45 +166,12 @@ object DoubaoClient {
             put("append_fields", JSONArray())
             put("is_finish", true)
             put("patch_type", 2)
-        })
-
-        // 图片块（block_type=10052，attachment_block.attachments[]）
-        if (images.isNotEmpty()) {
-            val attachments = JSONArray()
-            for (img in images) {
-                attachments.put(JSONObject().apply {
-                    put("type", 1)
-                    put("identifier", uuid())
-                    put("image", JSONObject().apply {
-                        put("name", img.name)
-                        put("uri", img.uri)
-                        put("image_ori", JSONObject().apply {
-                            put("url", img.url)
-                            put("width", img.width)
-                            put("height", img.height)
-                            put("format", img.format)
-                            put("url_formats", JSONObject())
-                        })
-                    })
-                    put("parse_state", 0)
-                    put("review_state", 0)
-                })
-            }
-            blocks.put(JSONObject().apply {
-                put("block_type", 10052)
-                put("content", JSONObject().apply {
-                    put("attachment_block", JSONObject().apply {
-                        put("attachments", attachments)
-                    })
-                })
-                put("block_id", uuid())
-                put("parent_id", "")
-                put("meta_info", JSONArray())
-                put("append_fields", JSONArray())
-                put("is_finish", true)
-                put("patch_type", 2)
-            })
         }
+        messages.put(JSONObject().apply {
+            put("local_message_id", uuid())
+            put("content_block", JSONArray().apply { put(textBlock) })
+            put("message_status", 0)
+        })
 
         val payload = JSONObject().apply {
             put("client_meta", JSONObject().apply {
@@ -166,13 +181,7 @@ object DoubaoClient {
                 put("last_section_id", "")
                 put("last_message_index", 0)
             })
-            put("messages", JSONArray().apply {
-                put(JSONObject().apply {
-                    put("local_message_id", uuid())
-                    put("content_block", blocks)
-                    put("message_status", 0)
-                })
-            })
+            put("messages", messages)
             put("option", JSONObject().apply {
                 put("send_message_scene", "")
                 put("create_time_ms", 0)
@@ -893,26 +902,389 @@ object DoubaoClient {
             .header("Cookie", cookieHeader)
         if (hasRefs) reqBuilder.header("x-tt-passport-csrf-token", csrfToken)
         val req = reqBuilder.build()
+        LogStore.i("Doubao", "视频请求 url=$url body_len=${body.length}")
 
         client.newCall(req).execute().use { resp ->
             if (!resp.isSuccessful) {
                 val err = resp.body?.string() ?: ""
                 throw RuntimeException("豆包生图 HTTP ${resp.code}: ${err.take(300)}")
             }
-            val bodyText = resp.body!!.string()
-            LogStore.i("Doubao", "生图响应 len=${bodyText.length} 含2074=${bodyText.contains("2074")} 含raw=${bodyText.contains("image_ori_raw")}")
-            // 解析新版响应（patch_op + block_type 2074 creation_block）或旧版 samantha（event_type 2001 + content_type 2010）
-            val images = if (hasRefs) parseNewGenResponse(bodyText) else parseSamanthaGenResponse(bodyText)
-            LogStore.i("Doubao", "生图解析到图片数=${images.size}")
-            return DoubaoImageResult(images, prompt)
+            // 按 SSE 事件增量解析：拿到完整图片后立即返回，不等待上游关闭连接。
+            val source = resp.body!!.source()
+            val event = StringBuilder()
+            var totalBytes = 0
+            while (!source.exhausted()) {
+                val line = source.readUtf8Line() ?: break
+                if (line.isEmpty()) {
+                    val block = event.toString()
+                    event.setLength(0)
+                    if (block.isBlank()) continue
+                    totalBytes += block.length
+                    val images = parseGenSseBlock(block, hasRefs)
+                    if (images.isNotEmpty()) {
+                        LogStore.i("Doubao", "生图首个完成事件解析到图片数=${images.size} 累计=${totalBytes}B")
+                        return DoubaoImageResult(images, prompt)
+                    }
+                } else {
+                    event.append(line).append('\n')
+                }
+            }
+            if (event.isNotBlank()) {
+                val images = parseGenSseBlock(event.toString(), hasRefs)
+                if (images.isNotEmpty()) return DoubaoImageResult(images, prompt)
+            }
+            LogStore.i("Doubao", "生图 SSE 结束，未解析到图片，累计=${totalBytes}B")
+            return DoubaoImageResult(emptyList(), prompt)
         }
+    }
+
+    /**
+     * 豆包视频生成（保守实现，待抓包确认）。
+     * 端点：与生图共用 samantha/chat/completion（纯文本）或 /chat/completion（带参考图）。
+     * content_type：尝试视频值（推测 2011，生图为 2010/2009）。
+     */
+    data class DoubaoVideoResult(val videoUrls: List<String>, val prompt: String, val raw: String? = null)
+
+    fun generateVideo(
+        prompt: String,
+        cookies: Map<String, String>,
+        ratio: String? = null,
+        refImages: List<RefImage> = emptyList(),
+    ): DoubaoVideoResult {
+        val params = securityParams()
+        val cookieHeader = cookies.entries.joinToString("; ") { (k, v) -> "$k=$v" }
+        val csrfToken = cookies["passport_csrf_token"] ?: cookies["passport_csrf_token_default"] ?: ""
+
+        val hasRefs = refImages.isNotEmpty()
+        val uploadedRefs = if (hasRefs) {
+            refImages.map { ref ->
+                val ext = when {
+                    ref.mime.contains("png", ignoreCase = true) -> "png"
+                    ref.mime.contains("webp", ignoreCase = true) -> "webp"
+                    else -> "jpeg"
+                }
+                uploadImageImageX(ref.bytes, ext, cookies)
+            }
+        } else emptyList()
+
+        val (url, body) = if (hasRefs) {
+            val (convId, sectionId) = createConversationSection(cookies)
+            LogStore.i("Doubao", "视频建会话 convId=$convId sectionId=$sectionId")
+            val localMessageId = uuid()
+            val identifier = uuid()
+            uploadedRefs.firstOrNull()?.let { ref ->
+                preHandleV2(ref.uri, convId, sectionId, localMessageId, identifier, cookies)
+            }
+            "$BASE_URL/chat/completion?${buildQueryString(params)}" to
+                buildVideoPayload(prompt, ratio, uploadedRefs, convId, sectionId, localMessageId, identifier)
+        } else {
+            "$BASE_URL/samantha/chat/completion?${buildQueryString(params)}" to
+                buildVideoPayload(prompt, ratio)
+        }
+
+        val reqBuilder = Request.Builder().url(url)
+            .post(body.toRequestBody("application/json".toMediaType()))
+            .header("Content-Type", "application/json")
+            .header("Accept", "text/event-stream")
+            .header("User-Agent", UA)
+            .header("Origin", BASE_URL)
+            .header("Referer", "$BASE_URL/chat")
+            .header("Cookie", cookieHeader)
+        if (hasRefs) reqBuilder.header("x-tt-passport-csrf-token", csrfToken)
+        val req = reqBuilder.build()
+        LogStore.i("Doubao", "视频请求 url=$url body_len=${body.length}")
+
+        client.newCall(req).execute().use { resp ->
+            val status = resp.code
+            val respHeaders = resp.headers.toMultimap().map { (k, v) -> "$k=${v.joinToString(",")}" }.joinToString(" | ")
+            LogStore.i("Doubao", "视频响应 status=$status headers=$respHeaders")
+            val respBodyEarly = runCatching { resp.peekBody(Long.MAX_VALUE).string() }.getOrElse { "" }
+            if (!resp.isSuccessful) {
+                LogStore.e("Doubao", "视频错误响应 body=${respBodyEarly.take(500)}")
+                throw RuntimeException("豆包视频 HTTP ${resp.code}: ${respBodyEarly.take(300)}")
+            }
+            val source = resp.body!!.source()
+            val event = StringBuilder()
+            var totalBytes = 0
+            while (!source.exhausted()) {
+                val line = source.readUtf8Line() ?: break
+                if (line.isEmpty()) {
+                    val block = event.toString()
+                    event.setLength(0)
+                    if (block.isBlank()) continue
+                    totalBytes += block.length
+                    val video = parseVideoSseBlock(block, hasRefs)
+                    if (video != null) {
+                        LogStore.i("Doubao", "视频首个完成事件 url=${video.videoUrls.joinToString(",")} 累计=${totalBytes}B")
+                        try {
+                            java.io.File("/data/data/com.wenwei.deepseekproxy.multiweb/files/doubao_video_debug.txt").writeText(
+                                org.json.JSONObject().apply {
+                                    put("request_url", url)
+                                    put("request_body", body)
+                                    put("response_status", status)
+                                    put("response_headers", respHeaders)
+                                    put("response_body_snippet", respBodyEarly.take(4000))
+                                    put("first_video_block", block.take(4000))
+                                    put("video_urls", org.json.JSONArray(video.videoUrls))
+                                }.toString(), java.nio.charset.StandardCharsets.UTF_8
+                            )
+                        } catch (_: Exception) {}
+                        return video
+                    }
+                } else {
+                    event.append(line).append('\n')
+                }
+            }
+            if (event.isNotBlank()) {
+                val video = parseVideoSseBlock(event.toString(), hasRefs)
+                if (video != null) {
+                    try {
+                        java.io.File("/data/data/com.wenwei.deepseekproxy.multiweb/files/doubao_video_debug.txt").writeText(
+                            org.json.JSONObject().apply {
+                                put("request_url", url)
+                                put("request_body", body)
+                                put("response_status", status)
+                                put("response_headers", respHeaders)
+                                put("response_body_snippet", respBodyEarly.take(4000))
+                                put("last_video_block", event.toString().take(4000))
+                                put("video_urls", org.json.JSONArray(video.videoUrls))
+                            }.toString(), java.nio.charset.StandardCharsets.UTF_8
+                        )
+                    } catch (_: Exception) {}
+                    return video
+                }
+            }
+            LogStore.i("Doubao", "视频 SSE 结束未解析到URL，累计=${totalBytes}B")
+            try {
+                java.io.File("/data/data/com.wenwei.deepseekproxy.multiweb/files/doubao_video_debug.txt").writeText(
+                    org.json.JSONObject().apply {
+                        put("request_url", url)
+                        put("request_body", body)
+                        put("response_status", status)
+                        put("response_headers", respHeaders)
+                        put("response_body_snippet", respBodyEarly.take(4000))
+                        put("last_block", event.toString().take(4000))
+                        put("video_urls", org.json.JSONArray())
+                    }.toString(), java.nio.charset.StandardCharsets.UTF_8
+                )
+            } catch (_: Exception) {}
+            return DoubaoVideoResult(emptyList(), prompt)
+        }
+    }
+
+    private fun buildVideoPayload(prompt: String, ratio: String?, refs: List<DoubaoUploadedImage> = emptyList(), convId: String? = null, sectionId: String? = null, localMessageId: String? = null, identifier: String? = null): String {
+        return if (refs.isEmpty() && convId == null) {
+            buildVideoSamanthaPayload(prompt, ratio)
+        } else {
+            buildVideoNewPayload(prompt, ratio, refs, convId!!, sectionId!!, localMessageId!!, identifier!!)
+        }
+    }
+
+    private fun buildVideoSamanthaPayload(prompt: String, ratio: String?): String {
+        val contentObj = JSONObject().apply { put("text", prompt) }
+        if (!ratio.isNullOrBlank()) {
+            contentObj.put("ratio", ratio)
+        }
+        val msg = JSONObject().apply {
+            put("content", contentObj.toString())
+            put("content_type", 2020)
+            put("attachments", JSONArray())
+            put("references", JSONArray())
+            put("skill", JSONObject().apply {
+                put("skill_type", 3)
+                put("skill_type_no_default", 3)
+                put("skill_id", "3")
+                put("skill_id_no_default", "3")
+            })
+        }
+        return JSONObject().apply {
+            put("messages", JSONArray().apply { put(msg) })
+            put("completion_option", JSONObject().apply {
+                put("is_regen", false)
+                put("with_suggest", true)
+                put("need_create_conversation", true)
+                put("launch_stage", 1)
+                put("is_replace", false)
+                put("is_delete", false)
+                put("is_ai_playground", false)
+                put("memory_type", 2)
+                put("message_from", 0)
+                put("use_deep_think", false)
+                put("use_auto_cot", false)
+                put("resend_for_regen", false)
+                put("enable_commerce_credit", false)
+                put("action_bar_skill_id", 3)
+            })
+            put("evaluate_option", JSONObject().apply { put("web_ab_params", "") })
+            put("local_conversation_id", uuid())
+            put("local_message_id", uuid())
+        }.toString()
+    }
+
+    private fun buildVideoNewPayload(prompt: String, ratio: String?, refs: List<DoubaoUploadedImage>, convId: String, sectionId: String, localMessageId: String, identifier: String): String {
+        val contentObj = JSONObject().apply { put("text", prompt) }
+        if (!ratio.isNullOrBlank()) contentObj.put("ratio", ratio)
+        val msg = JSONObject().apply {
+            put("content", contentObj.toString())
+            put("content_type", 2020)
+            put("attachments", JSONArray())
+            put("references", JSONArray())
+            if (refs.isNotEmpty()) {
+                val refArr = JSONArray()
+                for (ref in refs) {
+                    val ro = JSONObject().apply {
+                        put("name", ref.name)
+                        put("uri", ref.uri)
+                        put("url", ref.url)
+                        put("identifier", identifier)
+                        put("type", "image")
+                        put("upload_status", 1)
+                        put("progress", 100)
+                        put("review_state", 1)
+                        put("width", ref.width)
+                        put("height", ref.height)
+                    }
+                    val ao = JSONObject().apply {
+                        put("name", ref.name)
+                        put("url", ref.url)
+                        put("uri", ref.uri)
+                        put("identifier", identifier)
+                        put("type", "attachment")
+                        put("upload_status", 1)
+                        put("progress", 100)
+                        put("review_state", 1)
+                        put("image_ori", JSONObject().apply {
+                            put("url", "")
+                            put("format", "")
+                            put("width", ref.width)
+                            put("height", ref.height)
+                        })
+                    }
+                    refArr.put(ro)
+                    refArr.put(ao)
+                }
+                put("reference", JSONArray().apply { put(JSONObject().apply { put("id", identifier) }) })
+            }
+            put("client_meta", JSONObject().apply {
+                put("conversation_id", convId)
+                put("last_section_id", sectionId)
+            })
+        }
+        return JSONObject().apply {
+            put("messages", JSONArray().apply { put(msg) })
+            put("completion_option", JSONObject().apply {
+                put("is_regen", false)
+                put("with_suggest", true)
+                put("need_create_conversation", false)
+                put("launch_stage", 1)
+                put("is_replace", false)
+                put("is_delete", false)
+                put("is_ai_playground", false)
+                put("memory_type", 2)
+                put("message_from", 0)
+                put("use_deep_think", false)
+                put("use_auto_cot", false)
+                put("resend_for_regen", false)
+                put("enable_commerce_credit", false)
+                put("action_bar_skill_id", 3)
+            })
+            put("evaluate_option", JSONObject().apply { put("web_ab_params", "") })
+            put("local_conversation_id", convId)
+            put("local_message_id", localMessageId)
+        }.toString()
+    }
+
+    private fun parseVideoSseBlock(block: String, hasRefs: Boolean): DoubaoVideoResult? {
+        LogStore.i("Doubao", "parseVideoSseBlock enter hasRefs=$hasRefs block_len=${block.length}")
+        // 先尝试新版 /chat/completion 结构（creation_block / block_type）
+        if (hasRefs) {
+            try {
+                val data = JSONObject(block)
+                val msg = data.optJSONObject("message") ?: data
+                val cbArr = msg.optJSONArray("content_block") ?: data.optJSONArray("content_block")
+                if (cbArr != null) {
+                    for (i in 0 until cbArr.length()) {
+                        val cb = cbArr.optJSONObject(i) ?: continue
+                        val bt = cb.optInt("block_type", 0)
+                        val c = cb.optJSONObject("content") ?: JSONObject()
+                        if (bt == 2075 || bt == 2076) {
+                            val urls = mutableListOf<String>()
+                            val arr = c.optJSONArray("data")
+                            if (arr != null) {
+                                for (j in 0 until arr.length()) {
+                                    val item = arr.optJSONObject(j) ?: continue
+                                    val u = item.optString("url", "")
+                                        .ifBlank { (item.optJSONObject("video_ori")?.optString("url", "") ?: "") }
+                                    if (u.isNotBlank()) urls.add(u)
+                                }
+                            }
+                            if (urls.isNotEmpty()) {
+                                LogStore.i("Doubao", "parseVideoNew 命中 block_type=$bt urls=$urls")
+                                return DoubaoVideoResult(urls, "")
+                            }
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                LogStore.e("Doubao", "parseVideoNew err=${e.message}")
+            }
+        }
+        // Samantha 协议：event_type / event_data
+        try {
+            for (line in block.trim().lineSequence()) {
+                if (!line.startsWith("data:")) continue
+                val payload = line.substring(5).trim()
+                val obj = JSONObject(payload)
+                if (obj.optInt("error_code") != 0) {
+                    val code = obj.optInt("error_code")
+                    throw RuntimeException("豆包视频错误($code): ${obj.optString("error_msg")}")
+                }
+                if (obj.optInt("event_type") == 2005) {
+                    throw RuntimeException("豆包视频错误: ${obj.opt("event_data")}")
+                }
+                if (obj.optInt("event_type") != 2001) continue
+                val ed = if (obj.opt("event_data") is String) JSONObject(obj.getString("event_data")) else obj.optJSONObject("event_data") ?: JSONObject()
+                val msg = ed.optJSONObject("message") ?: JSONObject()
+                val contentType = msg.optInt("content_type", 0)
+                LogStore.i("Doubao", "parseVideoSamantha event_type=2001 content_type=$contentType")
+                if (contentType != 2020 && contentType != 2021) continue
+                val content = if (msg.opt("content") is String) JSONObject(msg.getString("content")) else msg.optJSONObject("content") ?: JSONObject()
+                val urls = mutableListOf<String>()
+                val arr = content.optJSONArray("data")
+                if (arr != null) {
+                    for (i in 0 until arr.length()) {
+                        val item = arr.optJSONObject(i) ?: continue
+                        val u = item.optString("video_url", "")
+                            .ifBlank { item.optString("url", "") }
+                            .ifBlank { (item.optJSONObject("video_ori")?.optString("url", "") ?: "") }
+                        if (u.isNotBlank()) urls.add(u)
+                    }
+                }
+                if (urls.isNotEmpty()) {
+                    LogStore.i("Doubao", "parseVideoSamantha 命中 urls=$urls")
+                    return DoubaoVideoResult(urls, "")
+                }
+            }
+        } catch (e: Exception) {
+            LogStore.e("Doubao", "parseVideoSamantha err=${e.message}")
+        }
+        LogStore.e("Doubao", "parseVideoSseBlock 未命中，block=${block.take(500)}")
+        return null
+    }
+
+    /** 解析单个 SSE 事件；完成图片出现后即可提前结束读取。 */
+    private fun parseGenSseBlock(block: String, hasRefs: Boolean): List<DoubaoImage> {
+        return if (hasRefs) parseNewGenResponse(block) else parseSamanthaGenResponse(block)
     }
 
     /** 解析新版 /chat/completion 生图响应：patch_op[].patch_value.content_block[].block_type=2074 creation_block。 */
     private fun parseNewGenResponse(bodyText: String): List<DoubaoImage> {
         val images = mutableListOf<DoubaoImage>()
+        var blockCount = 0
+        var block2074Count = 0
         for (block in bodyText.split("\n\n")) {
             if (block.isBlank()) continue
+            blockCount++
             var dataStr = ""
             for (line in block.trim().lineSequence()) {
                 if (line.startsWith("data:")) dataStr = line.substring(5).trim()
@@ -936,12 +1308,26 @@ object DoubaoClient {
                 val cbTop = data.optJSONArray("content_block")
                 if (cbTop != null) for (j in 0 until cbTop.length()) blocks.add(cbTop.getJSONObject(j))
                 for (cb in blocks) {
+                    val blockType = cb.optInt("block_type", 0)
+                    if (blockType == 2074) {
+                        block2074Count++
+                        val isFinish = cb.optBoolean("is_finish", false)
+                        android.util.Log.i("DoubaoGen", "发现 block_type:2074, is_finish=$isFinish")
+                    }
                     // 只收 is_finish=true 的完成块（生成图完整数据）
-                    if (cb.optInt("block_type", 0) != 2074) continue
-                    if (!cb.optBoolean("is_finish", false)) continue
+                    if (blockType != 2074) continue
+                    if (!cb.optBoolean("is_finish", false)) {
+                        android.util.Log.w("DoubaoGen", "block_type:2074 但 is_finish=false，跳过")
+                        continue
+                    }
                     val creations = cb.optJSONObject("content")
                         ?.optJSONObject("creation_block")
-                        ?.optJSONArray("creations") ?: continue
+                        ?.optJSONArray("creations")
+                    if (creations == null) {
+                        android.util.Log.w("DoubaoGen", "block_type:2074 但找不到 creations")
+                        continue
+                    }
+                    android.util.Log.i("DoubaoGen", "block_type:2074 is_finish=true, creations.length=${creations.length()}")
                     for (k in 0 until creations.length()) {
                         val img = creations.optJSONObject(k)?.optJSONObject("image") ?: continue
                         val ori = img.optJSONObject("image_ori") ?: JSONObject()
@@ -949,10 +1335,13 @@ object DoubaoClient {
                         val thumb = img.optJSONObject("image_thumb") ?: JSONObject()
                         val key = img.optString("key", "")
                         if (key.isBlank()) continue
+                        val oriUrl = ori.optString("url", "")
+                        val rawUrl = oriRaw.optString("url", "")
+                        android.util.Log.i("DoubaoGen", "解析到图片: key=$key, oriUrl前80=${oriUrl.take(80)}")
                         images.add(DoubaoImage(
                             key = key,
-                            oriUrl = ori.optString("url", ""),
-                            rawUrl = oriRaw.optString("url", ""),
+                            oriUrl = oriUrl,
+                            rawUrl = rawUrl,
                             thumbUrl = thumb.optString("url", ""),
                             width = ori.optInt("width", thumb.optInt("width", 0)),
                             height = ori.optInt("height", thumb.optInt("height", 0)),
@@ -962,8 +1351,10 @@ object DoubaoClient {
                 }
             } catch (e: Exception) {
                 if (e.message?.startsWith("豆包生图错误") == true) throw e
+                android.util.Log.e("DoubaoGen", "解析 SSE 块异常: ${e.message}")
             }
         }
+        android.util.Log.i("DoubaoGen", "parseNewGenResponse 完成: 总块数=$blockCount, 2074块数=$block2074Count, 解析图片数=${images.size}")
         return images
     }
 

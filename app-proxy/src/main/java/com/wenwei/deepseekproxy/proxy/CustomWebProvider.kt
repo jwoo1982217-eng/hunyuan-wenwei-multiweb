@@ -1,8 +1,11 @@
 package com.wenwei.deepseekproxy.proxy
 
 import android.content.Context
+import android.util.Base64
+import android.util.Log
 import android.os.Handler
 import android.os.Looper
+import android.net.Uri
 import android.webkit.CookieManager
 import android.webkit.WebView
 import kotlinx.coroutines.Dispatchers
@@ -23,6 +26,7 @@ import okhttp3.Request
 import org.json.JSONArray
 import org.json.JSONObject
 import java.net.URI
+import java.io.File
 import java.util.UUID
 import kotlin.coroutines.resume
 
@@ -51,6 +55,14 @@ fun customWebImageModelId(config: CustomWebProviderConfig): String =
         config.modelId.removeSuffix("-web") + "-image-web"
     } else {
         "${config.modelId}-image"
+    }
+
+/** 自定义 Web 供应商的视频模型 id：longcat-chat → longcat-chat-video-web。 */
+fun customWebVideoModelId(config: CustomWebProviderConfig): String =
+    if (config.modelId.endsWith("-web")) {
+        config.modelId.removeSuffix("-web") + "-video-web"
+    } else {
+        "${config.modelId}-video"
     }
 
 internal fun parseArenaTextStream(raw: String): String = buildString {
@@ -173,6 +185,7 @@ object CustomWebProviderRegistry {
 }
 
 fun isBuiltInBrowserRelay(provider: WebProviderType): Boolean = provider in setOf(
+    WebProviderType.DEEPSEEK_WEB,
     WebProviderType.QWEN_AI_WEB,
     WebProviderType.MINIMAX_WEB,
     WebProviderType.MIMO_WEB,
@@ -191,16 +204,19 @@ fun builtInBrowserRelayConfig(provider: WebProviderType): CustomWebProviderConfi
         loginUrl = provider.loginUrl.orEmpty(),
         // Keep selectors only where the site exposes stable semantic contracts.
         inputSelector = when (provider) {
+            WebProviderType.DEEPSEEK_WEB -> "textarea"
             WebProviderType.MIMO_WEB -> "textarea[placeholder='有问题，尽管问']"
             WebProviderType.ARENA_GUEST -> "textarea[placeholder='Ask anything…']"
             else -> ""
         },
         sendSelector = when (provider) {
+            WebProviderType.DEEPSEEK_WEB -> "button[type='submit'],button[aria-label*='发送'],button[aria-label*='Send']"
             WebProviderType.MIMO_WEB -> "[data-track-id='claw_send_btn']"
             WebProviderType.ARENA_GUEST -> "button[type='submit']"
             else -> ""
         },
         responseSelector = when (provider) {
+            WebProviderType.DEEPSEEK_WEB -> ".ds-markdown"
             WebProviderType.MIMO_WEB -> ".markdown-prose"
             else -> ""
         },
@@ -267,24 +283,66 @@ object CustomWebChatAutomation {
         // 确保聊天输入框就绪（豆包等网页默认停在列表/首页，没有输入框时会
         // 误选搜索框导致发送失败）。等待输入框出现，必要时点"新对话"。
         ensureChatInputReady(view, config)
+        // longcat 聊天模式发送按钮被锁（ProseMirror input 事件未触发），强制解锁
+        if (config.loginUrl.contains("longcat.chat", ignoreCase = true)) {
+            runCatching {
+                evaluate(view, """
+                    (()=>{try{
+                      if(window.__multiwebSendUnlocker)return 'dup';
+                      const enable=()=>{
+                        const b=document.querySelector('.send-btn');
+                        const e=document.querySelector('[contenteditable][role="textbox"]');
+                        if(!b||!e)return;
+                        const has=(e.innerText||'').trim().length>0;
+                        if(has){
+                          b.disabled=false;
+                          b.removeAttribute('aria-disabled');
+                          b.classList.remove('send-btn-disabled');
+                          b.style.opacity='1';
+                          b.style.pointerEvents='auto';
+                          b.style.cursor='pointer';
+                        }
+                      };
+                      enable();
+                      const mo=new MutationObserver(enable);
+                      mo.observe(document.documentElement||document.body,{childList:true,subtree:true,characterData:true});
+                      window.__multiwebSendUnlocker=mo;
+                      return 'unlocked';
+                    }catch(e){return String(e)}})()
+                """.trimIndent())
+            }
+        }
         // 关闭/隐藏网页推广横幅（豆包的"下载电脑客户端"卡片等会遮挡聊天区）
         dismissPromotionBanners(view, config)
         // 通用图片上传：与 ChatGPT/Gemini 同一套 input[type=file] 注入脚本，
         // 不依赖特定账号或页面结构，任意已登录会话均可用。
         val attachments = messages.flatMap(ChatMessage::attachments)
         val hasImageAttachments = attachments.isNotEmpty()
+        // DeepSeek 识图模式切换：有附件时需先点击"识图模式"标签
+        if (config.loginUrl.contains("chat.deepseek.com", ignoreCase = true) && hasImageAttachments) {
+            switchDeepSeekVisionMode(view)
+        }
+        android.util.Log.i("BrowserRelay", "准备上传附件 count=${attachments.size}")
         if (attachments.isNotEmpty()) {
+            // 恢复原先的 DeepSeek 路径：JS 注入附件后继续填充文字，允许用户在浏览器手动发送。
+            // 原生 onShowFileChooser 桥接会被隐藏 input.click() 阻塞，不能放在主流程前面等待。
             uploadAttachments(view, attachments, config)
         }
+        android.util.Log.i("BrowserRelay", "附件上传完成")
         val textMessages = messages.filter { it.textContent().isNotBlank() }
         val prompt = if (textMessages.size == 1 && textMessages[0].role == "user") {
             textMessages[0].textContent()
         } else {
             textMessages.joinToString("\n\n") { "[${it.role}]: ${it.textContent()}" }
         }
-        val response = JSONObject.quote(config.responseSelector)
+        // LongCat 的真实 AI 回复容器稳定为 .v-chat-assistant-message；不依赖旧保存配置。
+        val effectiveResponseSelector = if (config.loginUrl.contains("longcat.chat", ignoreCase = true)) {
+            ".v-chat-assistant-message"
+        } else config.responseSelector
+        val response = JSONObject.quote(effectiveResponseSelector)
         val text = JSONObject.quote(prompt)
         val arenaGuest = isArenaGuestWebConfig(config)
+        val isLongCat = config.loginUrl.contains("longcat.chat", ignoreCase = true)
         val autoInput = """(()=>{const visible=e=>{if(!e||e.disabled||e.readOnly||e.offsetParent===null)return false;const s=getComputedStyle(e),r=e.getBoundingClientRect();return s.visibility!=='hidden'&&s.display!=='none'&&Number(s.opacity)>0.05&&r.width>80&&r.height>18};const score=e=>{const p=((e.getAttribute('placeholder')||'')+' '+(e.getAttribute('aria-label')||'')).toLowerCase();let n=0;if(e.tagName==='TEXTAREA')n+=120;if(e.isContentEditable)n+=100;if(e.getAttribute('role')==='textbox')n+=80;if(/message|prompt|chat|ask|输入|消息|提问/.test(p))n+=90;if(e.getAttribute('role')==='combobox')n-=200;if(e.type==='search')n-=100;const r=e.getBoundingClientRect();n+=Math.min(40,r.top/innerHeight*40);n+=Math.min(20,r.width/innerWidth*20);return n};return [...document.querySelectorAll('textarea,[contenteditable="true"],[role="textbox"],input[type="text"],input:not([type])')].filter(visible).sort((a,b)=>score(b)-score(a))[0]||null})()"""
         val inputElement = if (arenaGuest) {
             "[...document.querySelectorAll('textarea')].find(e=>/ask anything/i.test(e.getAttribute('placeholder')||''))"
@@ -339,7 +397,7 @@ object CustomWebChatAutomation {
                 .sort((a,b)=>b.n-a.n).find(x=>x.n>140)?.e||null;
             })()
         """.trimIndent()
-        val responseValues = if (config.responseSelector.isNotBlank()) {
+        val responseValues = if (effectiveResponseSelector.isNotBlank()) {
             "[...document.querySelectorAll($response)].map(e=>(e.innerText||e.textContent||'').trim())"
         } else {
             """
@@ -470,6 +528,7 @@ object CustomWebChatAutomation {
                 else{e.textContent=$text;const range=document.createRange();range.selectNodeContents(e);range.collapse(false);const selection=getSelection();selection.removeAllRanges();selection.addRange(range)}
                 e.dispatchEvent(new InputEvent('beforeinput',{bubbles:true,inputType:'insertText',data:$text}));e.dispatchEvent(new InputEvent('input',{bubbles:true,inputType:'insertText',data:$text}));e.dispatchEvent(new Event('change',{bubbles:true}));e.dispatchEvent(new KeyboardEvent('keyup',{bubbles:true,key:'Unidentified'}));const actual=(e.value??e.innerText??e.textContent??'').trim();return actual?'ok':'input_state_not_updated';}catch(x){return String(x)}})()
             """.trimIndent())
+            android.util.Log.i("BrowserRelay", "fillResult=${fillResult.take(120)}")
             if (fillResult != "ok") {
                 throw WebAutomationException(
                     "prompt_fill_failed",
@@ -481,15 +540,32 @@ object CustomWebChatAutomation {
             // 豆包网页版无 data-testid 发送按钮，发送靠输入框内 Enter 键。
             // longcat 用 ProseMirror(contenteditable)，Enter 是换行不发送；有明确 .send-btn，走下方点击逻辑。
             val useEnterToSend = config.loginUrl.contains("doubao.com", ignoreCase = true)
+                || config.loginUrl.contains("chat.deepseek.com", ignoreCase = true)
             if (useEnterToSend) {
-                // 直接派发 Enter 键发送（豆包 semi-input textarea / longcat ProseMirror 编辑器）
-                clicked = evaluate(view, """(()=>{try{
-                  const e=$inputElement;if(!e)return false;e.focus();
-                  e.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',code:'Enter',keyCode:13,which:13,bubbles:true,cancelable:true}));
-                  e.dispatchEvent(new KeyboardEvent('keypress',{key:'Enter',code:'Enter',keyCode:13,which:13,bubbles:true,cancelable:true}));
-                  e.dispatchEvent(new KeyboardEvent('keyup',{key:'Enter',code:'Enter',keyCode:13,which:13,bubbles:true,cancelable:true}));
-                  return true;
-                }catch(_){return false}})()""".trimIndent()) == "true"
+                val isDeepSeek = config.loginUrl.contains("chat.deepseek.com", ignoreCase = true)
+                if (isDeepSeek) {
+                    // DeepSeek: React 拦截所有程序化事件，用 CDP Input.dispatchKeyEvent 绕过
+                    clicked = evaluate(view, """(()=>new Promise(async resolve=>{try{
+                      const ta=document.querySelector('textarea');if(!ta){resolve('false');return;}ta.focus();
+                      const resp=await fetch('http://localhost:9222/json');
+                      const pages=await resp.json();
+                      const page=pages.find(p=>p.url.includes('chat.deepseek.com'));
+                      if(!page){resolve('false');return;}
+                      const ws=new WebSocket(page.webSocketDebuggerUrl);
+                      await new Promise(r=>{ws.onopen=r;ws.onerror=()=>resolve('false')});
+                      ws.send(JSON.stringify({id:1,method:'Input.dispatchKeyEvent',params:{type:'rawKeyDown',key:'Enter',code:'Enter',keyCode:13,nativeVirtualKeyCode:13,windowsVirtualKeyCode:13,text:'\\r',unmodifiedText:'\\r'}}));
+                      ws.send(JSON.stringify({id:2,method:'Input.dispatchKeyEvent',params:{type:'char',key:'Enter',code:'Enter',keyCode:13,text:'\\r',unmodifiedText:'\\r'}}));
+                      ws.send(JSON.stringify({id:3,method:'Input.dispatchKeyEvent',params:{type:'keyUp',key:'Enter',code:'Enter',keyCode:13,nativeVirtualKeyCode:13,windowsVirtualKeyCode:13}}));
+                      ws.close();resolve('true');
+                    }catch(e){resolve('false')}}))()""".trimIndent()) == "true"
+                } else {
+                    // 豆包: Enter 键
+                    clicked = evaluate(view, """(()=>{try{
+                      const e=$inputElement;if(!e)return false;e.focus();
+                      e.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',code:'Enter',keyCode:13,which:13,bubbles:true,cancelable:true}));
+                      return true;
+                    }catch(_){return false}})()""".trimIndent()) == "true"
+                }
             }
             while (!clicked && System.currentTimeMillis() < sendDeadline) {
                 clicked = evaluate(view, """(()=>{const b=$sendButton;if(!b||b.disabled||b.getAttribute('aria-disabled')==='true')return false;const e=$inputElement;const before=(e?.value??e?.innerText??e?.textContent??'').trim();b.dispatchEvent(new MouseEvent('mousedown',{bubbles:true}));b.click();b.dispatchEvent(new MouseEvent('mouseup',{bubbles:true}));if(e?.closest('form')&&before&&(e.value??e.innerText??e.textContent??'').trim()===before){try{e.closest('form').requestSubmit(b.type==='submit'?b:undefined)}catch(_){}}return true})()""") == "true"
@@ -514,6 +590,7 @@ object CustomWebChatAutomation {
                 """.trimIndent()) == "true"
             }
         }
+        android.util.Log.i("BrowserRelay", "发送结果 clicked=$clicked")
         if (!clicked) throw WebAutomationException(
             "send_button_not_ready",
             "${config.name} 未识别到发送控件，请在高级设置填写发送按钮 CSS"
@@ -576,7 +653,7 @@ object CustomWebChatAutomation {
                     }.orEmpty()
                 if (matched.isNotBlank()) {
                     matched
-                } else if (config.responseSelector.isNotBlank()) {
+                } else if (effectiveResponseSelector.isNotBlank()) {
                     // 已配置明确回复选择器但暂时匹配不到（AI 回复仍在生成），返回空等待，
                     // 避免 innerText 兜底把导航/输入框/页脚等界面文本误当回复。
                     ""
@@ -604,7 +681,7 @@ object CustomWebChatAutomation {
                     "Arena.ai 游客请求被拒绝，可能已达到频率限制，请稍后再试"
                 )
             }
-            val busy = evaluate(view, busyState) == "true"
+            val busy = if (isLongCat && current.isNotBlank()) false else evaluate(view, busyState) == "true"
             sawBusy = sawBusy || busy
             stable = if (current.isNotBlank() && current == last) stable + 1 else 0
             if (current.isNotBlank() && current != last) {
@@ -641,14 +718,17 @@ object CustomWebChatAutomation {
     }
 
     private suspend fun awaitAttached(config: CustomWebProviderConfig): Pair<WebView, String> {
+        android.util.Log.i("BrowserRelay", "awaitAttached config=${config.id} model=${config.modelId} current=${attached?.second}")
         attached?.takeIf { it.second == config.id }?.let { return it }
         BrowserRelayActivation.activate(config.modelId)
+        android.util.Log.i("BrowserRelay", "已请求打开浏览器 provider=${config.modelId}，等待附着")
         LogStore.i("BrowserRelay", "自动打开 ${config.name}，等待聊天 WebView")
         val deadline = System.currentTimeMillis() + BROWSER_AUTO_ATTACH_TIMEOUT_MS
         while (System.currentTimeMillis() < deadline) {
             delay(200)
             attached?.takeIf { it.second == config.id }?.let { return it }
         }
+        android.util.Log.e("BrowserRelay", "附着超时 config=${config.id} current=${attached?.second}")
         throw WebAutomationException(
             "webview_not_ready",
             "已尝试自动打开 ${config.name}，但网页未在 ${BROWSER_AUTO_ATTACH_TIMEOUT_MS / 1000} 秒内就绪；请打开一次 MultiWeb 浏览器页"
@@ -706,6 +786,33 @@ object CustomWebChatAutomation {
             "arena_text_mode_timeout",
             "Arena.ai 文本模式加载超时，请在浏览器打开 Text 页面后重试"
         )
+    }
+
+    /** DeepSeek 识图模式切换：点击"识图模式"标签切换到 vision 模式。 */
+    private suspend fun switchDeepSeekVisionMode(view: WebView) {
+        for (attempt in 0 until 3) {
+            val r = evaluate(view, """
+                (()=>{
+                  if(document.body.innerText.indexOf('使用识图模式开始对话')>=0) return 'already';
+                  const nodes=[...document.querySelectorAll('div,span,button')];
+                  for(let i=0;i<nodes.length;i++){
+                    const e=nodes[i];
+                    const x=(e.innerText||'').trim();
+                    if(x==='识图模式' && e.children.length===0){ e.click(); return 'clicked'; }
+                  }
+                  return 'not_found';
+                })()
+            """.trimIndent())
+            android.util.Log.i("BrowserRelay", "DeepSeek switchVision attempt=$attempt result=$r")
+            if (r == "already") return
+            if (r == "clicked") {
+                delay(1500)
+                val ok = evaluate(view, "String(document.body.innerText.indexOf('使用识图模式开始对话')>=0)")
+                if (ok == "true") return
+            }
+            delay(500)
+        }
+        android.util.Log.w("BrowserRelay", "DeepSeek 识图模式切换失败，继续尝试发送")
     }
 
     private suspend fun checkArenaGuestBlocker(view: WebView, config: CustomWebProviderConfig) {
@@ -882,6 +989,36 @@ object CustomWebChatAutomation {
      *     arm 脚本 hook click 拦截，把文件塞进 DataTransfer 并触发 change，不弹系统选择器。
      * 不依赖特定账号或页面结构，任意已登录的 Web 供应商会话均可用。
      */
+    private suspend fun uploadDeepSeekNativeAttachments(
+        view: WebView,
+        attachments: List<ChatAttachment>,
+        config: CustomWebProviderConfig,
+    ) {
+        if (!NativeWebFileChooserBridge.prepare(attachments)) {
+            throw WebAutomationException("deepseek_attachment_prepare_failed", "${config.name} 参考图准备失败")
+        }
+        val clicked = evaluate(view, """(()=>{const i=document.querySelector('input[type=file]');if(!i)return 'missing';i.click();return 'clicked'})()""")
+        if (clicked != "clicked") {
+            NativeWebFileChooserBridge.clear()
+            throw WebAutomationException("deepseek_upload_button_not_found", "${config.name} 未找到图片上传控件")
+        }
+        val deadline = System.currentTimeMillis() + 10_000
+        while (System.currentTimeMillis() < deadline) {
+            delay(200)
+            if (NativeWebFileChooserBridge.wasConsumed()) {
+                LogStore.i("CustomWeb", "${config.name} 已通过 WebView 原生文件选择器回传 ${attachments.size} 个附件")
+                delay(1200)
+                val state = evaluate(view, """(()=>JSON.stringify({files:document.querySelector('input[type=file]')?.files?.length||0,upload:document.body.innerText.includes('上传失败')}))()""")
+                if (state.contains("\"files\":0") || state.contains("\"upload\":true")) {
+                    throw WebAutomationException("deepseek_upload_rejected", "${config.name} 网页拒绝了原生图片上传")
+                }
+                return
+            }
+        }
+        NativeWebFileChooserBridge.clear()
+        throw WebAutomationException("deepseek_upload_timeout", "${config.name} 原生图片选择回调超时")
+    }
+
     private suspend fun uploadAttachments(
         view: WebView,
         attachments: List<ChatAttachment>,
@@ -912,7 +1049,15 @@ object CustomWebChatAutomation {
             if (injected) {
                 LogStore.i("CustomWeb", "${config.name} 已附加 ${attachments.size} 个附件（动态注入）")
             } else {
-                LogStore.w("CustomWeb", "${config.name} 未检测到文件注入，图片可能未附加")
+                LogStore.w("CustomWeb", "${config.name} 未检测到文件注入，回退直接注入")
+                // 回退：直接注入 input[type=file]
+                val retry = runCatching { result(evaluate(view, webAttachmentUploadScript(attachments))) }
+                    .getOrDefault(JSONObject())
+                if (retry.optBoolean("ok")) {
+                    LogStore.i("CustomWeb", "${config.name} 已附加 ${attachments.size} 个附件（直接注入回退）")
+                } else {
+                    LogStore.w("CustomWeb", "${config.name} 直接注入也失败，图片可能未附加")
+                }
             }
         } else if (state.optBoolean("ok") && mode == "direct") {
             LogStore.i("CustomWeb", "${config.name} 已附加 ${attachments.size} 个附件（直接注入）")
@@ -1468,6 +1613,38 @@ object CustomWebImageAutomation {
             )
         }
 
+        // 部分站点（清言等）提交后弹出「确认发送」卡片，需再点一次发送才真正生成
+        val confirmDeadline = System.currentTimeMillis() + 8_000
+        var confirmed = false
+        while (System.currentTimeMillis() < confirmDeadline) {
+            val r = evaluate(view, """
+                (()=>{try{
+                  const visible=e=>e&&e.offsetParent!==null&&getComputedStyle(e).visibility!=='hidden';
+                  // 找最近出现的「发送」按钮（含弹层内的）
+                  const btns=[...document.querySelectorAll('button,[role="button"],[id*="send" i],[class*="send" i],[aria-label*="发送"],[title*="发送"]')].filter(visible);
+                  const label=e=>((e.getAttribute('aria-label')||'')+' '+(e.innerText||'')+' '+(e.className||'')).trim();
+                  // 确认弹层的发送按钮通常带「发送」文案且不输入框同 form
+                  const send=btns.find(b=>/^(发送|确认|生成|开始|立即)/.test(label(b).trim())&&label(b).trim().length<=8)
+                    || btns.filter(b=>{const r=b.getBoundingClientRect();return r.width>30&&r.height>24}).pop();
+                  if(!send)return 'no_confirm';
+                  send.dispatchEvent(new MouseEvent('mousedown',{bubbles:true}));
+                  send.click();
+                  send.dispatchEvent(new MouseEvent('mouseup',{bubbles:true}));
+                  return 'clicked';
+                }catch(x){return 'no_confirm'}})()
+            """.trimIndent())
+            if (r == "clicked") {
+                confirmed = true
+                android.util.Log.i("CustomWebImage", "${config.name} 已点击确认发送")
+                delay(500)
+                break
+            }
+            if (r == "no_confirm") delay(300)
+        }
+        if (!confirmed) {
+            android.util.Log.i("CustomWebImage", "${config.name} 未发现确认弹层，直接开始轮询")
+        }
+
         val imageCandidates = """
             (() => {
               const visible=e=>{
@@ -1496,12 +1673,16 @@ object CustomWebImageAutomation {
                 if(/assistant|answer|response|bot|generated|result|bubble--ai|conv--ai|item--ai|message/.test(h))score+=180;
                 if(/avatar|logo|icon|emoji|sticker|profile|qrcode|qr-code|头像|图标|表情|二维码/.test(h))score-=300;
                 if(/human|bubble--human|conv--human|item--human|role.?user|message.?user|upload/.test(h))score-=260;
+                // base64/data 图片：清言等 AI 生图结果，天然是生成图，高优先级
+                if(src.startsWith('data:image/'))score+=400;
                 if(image.naturalWidth>=512&&image.naturalHeight>=512)score+=160;
                 else if(image.naturalWidth>=256&&image.naturalHeight>=256)score+=90;
                 if(image.naturalWidth*image.naturalHeight>=150000)score+=80;
                 if(image.closest('nav,aside,header,footer,[role="dialog"],form'))score-=250;
+                // data URL 图片不需要等 complete，直接算 ready
+                const isData=src.startsWith('data:image/');
                 return {src,index,score,w:image.naturalWidth,h:image.naturalHeight,
-                  ready:visible(image)&&image.complete&&image.naturalWidth>=128&&image.naturalHeight>=128};
+                  ready:(isData||visible(image))&&(image.complete||isData)&&(isData||(image.naturalWidth>=128&&image.naturalHeight>=128))};
               }).filter(x=>x.ready&&x.src&&x.score>=120)
                 .sort((a,b)=>a.index-b.index);
             })()
@@ -1689,16 +1870,32 @@ object CustomWebImageAutomation {
     }
 
     private suspend fun generateLongCat(view: WebView, config: CustomWebProviderConfig, prompt: String, refImages: List<ChatAttachment> = emptyList()): List<String> {
-        var mode = evaluate(view, """(()=>{const exact=t=>[...document.querySelectorAll('body *')].find(e=>e.offsetParent!==null&&(e.innerText||'').trim()===t);if(exact('图片生成')?.closest('.agent-skills'))return 'active';const item=exact('图片生成');if(item){(item.closest('.v-checked-button')||item).click();return 'clicked'}const more=exact('更多');if(more){const box=more.closest('[data-more="true"]');(box?.querySelector('.van-popover__wrapper')||box||more).click();return 'opened'}return 'missing'})()""")
+        android.util.Log.i("LongCatGen", "generateLongCat 入口 prompt=${prompt.take(40)} refImages=${refImages.size} config=${config.name}")
+        var mode = evaluate(view, """(()=>{
+            const visible=e=>e&&e.offsetParent!==null;
+            // LongCat 图片主页没有稳定的“图片生成”文字菜单，出现额度/做同款即已在生图模式。
+            const imageHome=[...document.querySelectorAll('body *')].some(e=>visible(e)&&(
+                (e.innerText||'').trim()==='做同款' || /每日体验次数/.test((e.innerText||'').trim())
+            ));
+            if(imageHome)return 'active';
+            const exact=t=>[...document.querySelectorAll('body *')].find(e=>visible(e)&&(e.innerText||'').trim()===t);
+            if(exact('图片生成')?.closest('.agent-skills'))return 'active';
+            const item=exact('图片生成');
+            if(item){(item.closest('.v-checked-button')||item).click();return 'clicked'}
+            const more=exact('更多');
+            if(more){const box=more.closest('[data-more="true"]');(box?.querySelector('.van-popover__wrapper')||box||more).click();return 'opened'}
+            return 'missing'
+        })()""")
         if (mode == "opened") {
             delay(800)
             mode = evaluate(view, """(()=>{const all=[...document.querySelectorAll('body *')].filter(e=>e.offsetParent!==null&&(e.innerText||'').trim()==='图片生成');const active=all.find(e=>e.closest('.agent-skills'));if(active)return 'active';const e=all[all.length-1];if(!e)return 'missing';(e.closest('.v-checked-button,[role="menuitem"]')||e).click();return 'clicked'})()""")
         }
         if (mode == "missing") throw WebAutomationException("image_mode_not_found", "${config.name} 图片生成模式不可用")
+        android.util.Log.i("LongCatGen", "模式检测结果 mode=$mode")
         delay(350)
         // 注入参考图（图生图）：Longcat 生图界面有 #file-upload-gen_image input
         if (refImages.isNotEmpty()) {
-            val inj = runCatching { JSONObject(evaluate(view, longCatRefImageScript(refImages))) }.getOrDefault(JSONObject())
+            val inj = runCatching { JSONObject(evaluate(view, CustomWebImageAutomation.longCatRefImageScript(refImages))) }.getOrDefault(JSONObject())
             if (!inj.optBoolean("ok")) {
                 LogStore.w("CustomWebImage", "${config.name} 参考图注入失败: ${inj.optString("error", "unknown")}")
             } else {
@@ -1712,24 +1909,58 @@ object CustomWebImageAutomation {
         val baselineSet = runCatching { JSONArray(baseline) }.getOrDefault(JSONArray()).let { a ->
             (0 until a.length()).map { a.optString(it) }.toSet()
         }
+        android.util.Log.i("LongCatGen", "baseline 图片数=${baselineSet.size}")
         val submitted = evaluate(view, """
             (()=>{try{const e=document.querySelector('[contenteditable="true"][role="textbox"]');const b=document.querySelector('.send-btn');if(!e)return 'input_not_found';if(!b)return 'send_not_found';e.focus();e.innerHTML='<p></p>';e.querySelector('p').textContent=${JSONObject.quote(prompt)};e.dispatchEvent(new InputEvent('input',{bubbles:true,inputType:'insertText',data:${JSONObject.quote(prompt)}}));b.click();return 'ok'}catch(x){return String(x)}})()
         """.trimIndent())
+        android.util.Log.i("LongCatGen", "提交结果 submitted=$submitted")
         if (submitted != "ok") throw WebAutomationException("image_submit_failed", "${config.name} 生图提交失败：$submitted")
-        val deadline = System.currentTimeMillis() + 180_000
+        val deadline = System.currentTimeMillis() + 300_000
         while (System.currentTimeMillis() < deadline) {
             delay(500)
             val values = runCatching { JSONArray(evaluate(view, "JSON.stringify([...document.images].filter(i=>i.offsetParent!==null&&i.naturalWidth>256).map(i=>i.currentSrc||i.src).filter(Boolean))")) }.getOrDefault(JSONArray())
             val fresh = (0 until values.length()).map { values.optString(it) }
                 .filter { it.isNotBlank() && it !in baselineSet && !it.startsWith("data:") }
                 .distinct()
-            if (fresh.isNotEmpty()) return fresh.take(4)
+            android.util.Log.i("LongCatGen", "轮询: 可见大图=${values.length()}, fresh=${fresh.size}, 各图src前缀=${(0 until values.length()).map { values.optString(it).take(30) }.joinToString("|")}")
+            val allImagesDump = evaluate(view, "JSON.stringify([...document.images].map(i=>({src:(i.currentSrc||i.src||'').slice(0,50),nw:i.naturalWidth||0,vis:!!(i.offsetParent!==null)})))")
+            android.util.Log.i("LongCatGen", "轮询全量图片: $allImagesDump")
+            if (fresh.isNotEmpty()) {
+                val cached = fresh.take(4).map { url ->
+                    runCatching { cacheLongCatImage(view, url) }.getOrElse { error ->
+                        LogStore.w("CustomWebImage", "${config.name} 图片缓存失败: ${error.message}")
+                        url
+                    }
+                }
+                return cached
+            }
         }
         throw WebAutomationException("image_timeout", "${config.name} 网页生图等待超时")
     }
 
-    /** Longcat 生图参考图注入：往 #file-upload-gen_image input 注入 DataTransfer 文件。 */
-    private fun longCatRefImageScript(refs: List<ChatAttachment>): String {
+    /** 将 LongCat 页面私有 blob URL 在原 WebView 内转为 data URL，再落到本地生成图存储。 */
+    private suspend fun cacheLongCatImage(view: WebView, url: String): String {
+        if (!url.startsWith("blob:", ignoreCase = true)) {
+            return cacheWebImage(url, "https://longcat.chat/")
+        }
+        val dataUrl = evaluate(view, """
+            (()=>new Promise(resolve=>{
+                fetch(${JSONObject.quote(url)}).then(r=>r.blob()).then(blob=>{
+                    const reader=new FileReader();
+                    reader.onload=()=>resolve(reader.result||'');
+                    reader.onerror=()=>resolve('');
+                    reader.readAsDataURL(blob);
+                }).catch(()=>resolve(''));
+            }))()
+        """.trimIndent())
+        if (!dataUrl.startsWith("data:image/", ignoreCase = true)) {
+            throw WebAutomationException("image_download_failed", "LongCat blob 图片读取失败")
+        }
+        return withContext(Dispatchers.IO) { GeneratedImageStore.saveDataUrl(dataUrl) }
+    }
+
+    /** Longcat 生图/视频参考图注入：往 #file-upload-gen_image input 注入 DataTransfer 文件。 */
+    internal fun longCatRefImageScript(refs: List<ChatAttachment>): String {
         val encoded = buildJsonArray {
             refs.forEach { item ->
                 add(buildJsonObject {
@@ -1787,6 +2018,326 @@ object CustomWebImageAutomation {
     """.trimIndent()
     private val ARENA_REJECTION_PATTERN =
         Regex("prompt failed|rate limit|too many requests", RegexOption.IGNORE_CASE)
+}
+
+/**
+ * 自定义 Web 视频生成（WebView 驱动）。
+ *
+ * 通用流程：找到输入框填入提示词 → 点击「生成视频」类按钮 →
+ * 轮询页面中的 <video> 元素 / mp4 链接 / 视频缩略图，取到新出现的视频 URL。
+ *
+ * 与 [CustomWebImageAutomation] 同一套 attach/evaluate 机制；attach 由浏览器 tab
+ * 的 AndroidView factory 调用（CustomWebImageAutomation.attach 同源）。
+ */
+object CustomWebVideoAutomation {
+    private val main = Handler(Looper.getMainLooper())
+    private val lock = customWebAutomationLock
+    private val client = OkHttpClient()
+
+    @Volatile private var attached: Pair<WebView, String>? = null
+
+    fun attach(view: WebView, configId: String) { attached = view to configId }
+    fun detach(view: WebView) { if (attached?.first === view) attached = null }
+    fun attachedConfigId(): String? = attached?.second
+
+    suspend fun generateVideo(config: CustomWebProviderConfig, prompt: String, refImages: List<ChatAttachment> = emptyList()): List<String> = lock.withLock {
+        val (view, _) = awaitAttached(config)
+        android.util.Log.i("CustomWebVideo", "generateVideo 入口 prompt=${prompt.take(40)} refImages=${refImages.size} config=${config.name}")
+        // 美团（LongCat）：走专用逻辑（模式切换/ProseMirror 输入/send-btn），与生图同构
+        if (config.loginUrl.contains("longcat.chat", ignoreCase = true)) {
+            return@withLock generateLongCatVideo(view, config, prompt, refImages)
+        }
+        // 识别「生成视频」按钮：优先中文文案，兜底 video 相关英文
+        val submitted = evaluate(view, """
+            (()=>{try{
+              const input=document.querySelector('textarea')||document.querySelector('input[type="text"]')||
+                document.querySelector('[contenteditable="true"][role="textbox"]')||
+                [...document.querySelectorAll('[contenteditable="true"]')].filter(e=>e.offsetParent!==null)[0];
+              if(!input)return 'input_not_found';
+              // 探测输入框类型，便于排查站点差异
+              window.__mwVideoInputTag=input.tagName;
+              window.__mwVideoInputEditable=!!input.isContentEditable;
+              if(input.tagName==='TEXTAREA'||input.tagName==='INPUT'){
+                const setter=Object.getOwnPropertyDescriptor(
+                  input.tagName==='TEXTAREA'?HTMLTextAreaElement.prototype:HTMLInputElement.prototype,'value'
+                )?.set;
+                if(setter)setter.call(input,${JSONObject.quote(prompt)});else input.value=${JSONObject.quote(prompt)};
+                input.dispatchEvent(new InputEvent('input',{bubbles:true,inputType:'insertText',data:${JSONObject.quote(prompt)}}));
+                input.dispatchEvent(new Event('change',{bubbles:true}));
+              }else{
+                input.focus();
+                input.textContent=${JSONObject.quote(prompt)};
+                input.dispatchEvent(new InputEvent('input',{bubbles:true,inputType:'insertText',data:${JSONObject.quote(prompt)}}));
+                input.dispatchEvent(new Event('change',{bubbles:true}));
+              }
+              const visible=e=>e&&e.offsetParent!==null;
+              const btns=[...document.querySelectorAll('button,[role="button"],[class*="btn" i]')].filter(b=>visible(b));
+              const label=e=>((e.getAttribute('aria-label')||'')+' '+(e.title||'')+' '+(e.innerText||'')+' '+(e.className||'')).trim().toLowerCase();
+              const button=btns.find(b=>/生成视频|生成影片|生成动画|开始生成|一键成片|create video|generate video|make video/i.test(label(b)))
+                || btns.find(b=>/^生成$|^开始$|^确定$|发送|send|generate|create|submit/i.test(label(b)))
+                // 兜底1：输入框右侧 60px 内的可点击元素（清言等站发送按钮是 div/span 图标）
+                || [...document.querySelectorAll('div,span,svg,img')].filter(e=>visible(e)&&(e.closest('button,label,[role="button"]')===null)).filter(b=>{
+                    const r=b.getBoundingClientRect();const i=input.getBoundingClientRect();
+                    return r.top>i.top-60&&r.bottom<i.bottom+60&&r.left>i.right-20&&r.left<i.right+120;
+                  }).sort((a,b)=>b.getBoundingClientRect().width-a.getBoundingClientRect().width)[0]
+                || btns.filter(b=>b.offsetParent!==null).filter(b=>{
+                    const r=b.getBoundingClientRect();const i=input.getBoundingClientRect();
+                    return r.top>i.top-50&&r.bottom<i.bottom+50&&r.left>i.right-60;
+                  }).pop()
+                || btns[btns.length-1];
+              if(!button)return 'send_not_found';
+              button.click();return 'ok';
+            }catch(e){return String(e)}})()
+        """.trimIndent())
+        android.util.Log.i("CustomWebVideo", "提交结果 submitted=$submitted")
+        val inputProbe = evaluate(view, "JSON.stringify({tag:window.__mwVideoInputTag||'',editable:window.__mwVideoInputEditable})")
+        android.util.Log.i("CustomWebVideo", "输入框探测: $inputProbe")
+        if (submitted != "ok") {
+            throw WebAutomationException("video_submit_failed", "${config.name} 视频生成提交失败：$submitted")
+        }
+        // 基线：记录提交前的视频 URL，避免把历史视频当本次结果
+        val baseline = evaluate(view, "JSON.stringify([...document.querySelectorAll('video')].map(v=>v.currentSrc||v.src).filter(Boolean))")
+        val baselineSet = runCatching { JSONArray(baseline) }.getOrDefault(JSONArray()).let { a ->
+            (0 until a.length()).map { a.optString(it) }.toSet()
+        }
+        // 视频生成通常 1~5 分钟，高峰期可能更久，放宽到 10 分钟
+        val deadline = System.currentTimeMillis() + 600_000
+        while (System.currentTimeMillis() < deadline) {
+            delay(800)
+            val state = evaluate(view, """
+                (()=>{try{
+                  const vids=[...document.querySelectorAll('video')].filter(v=>v.offsetParent!==null);
+                  const srcs=vids.map(v=>v.currentSrc||v.src||'').filter(Boolean);
+                  // 兜底：页面里的 mp4 链接（a[href$=.mp4] / 显式 mp4 字符串）
+                  const links=[...document.querySelectorAll('a[href*=".mp4"],video source[src*=".mp4"]')]
+                    .map(e=>e.href||e.getAttribute('src')||'').filter(Boolean);
+                  const bodyText=(document.body.innerText||'');
+                  const err=/生成失败|视频生成失败|网络错误|too many requests|rate limit/i.test(bodyText);
+                  return JSON.stringify({srcs:[...new Set([...srcs,...links])],err});
+                }catch(e){return JSON.stringify({srcs:[],err:false})}})()
+            """.trimIndent())
+            val obj = runCatching { JSONObject(state) }.getOrDefault(JSONObject())
+            if (obj.optBoolean("err")) {
+                throw WebAutomationException("upstream_page_error", "${config.name} 网页提示生成失败")
+            }
+            val srcs = runCatching {
+                val arr = obj.optJSONArray("srcs")
+                (0 until arr.length()).map { arr.optString(it) }.filter {
+                    it.isNotBlank() && it !in baselineSet && isRealVideoUrl(it)
+                }
+            }.getOrDefault(emptyList())
+            if (srcs.isNotEmpty()) {
+                android.util.Log.i("CustomWebVideo", "解析到视频 ${srcs.size} 个: ${srcs.first().take(100)}")
+                return@withLock srcs.distinct()
+            }
+        }
+        throw WebAutomationException("video_timeout", "${config.name} 网页视频生成等待超时")
+    }
+
+    /** 过滤非真实视频 URL：排除站点导航/页面链接，只认 mp4/webm/云存储/带 video 扩展名的。 */
+    private fun isRealVideoUrl(url: String): Boolean {
+        val lower = url.lowercase()
+        if (lower.endsWith(".mp4") || lower.endsWith(".webm") || lower.endsWith(".m3u8") ||
+            lower.contains(".mp4?") || lower.contains(".mp4&") || lower.contains(".webm?")) return true
+        // 常见云存储/视频域
+        if (Regex("(ufileos|oss-|aliyuncs|cloudfront|bigmodel|chatglm|maas|byteimg|vod|cdn)", RegexOption.IGNORE_CASE)
+                .containsMatchIn(lower) && !lower.endsWith("?lang=zh") && !lower.contains("/video?") && !lower.contains("/video#")) return true
+        return false
+    }
+
+    private suspend fun awaitAttached(config: CustomWebProviderConfig): Pair<WebView, String> {
+        attached?.takeIf { it.second == config.id }?.let { return it }
+        BrowserRelayActivation.activate(config.modelId)
+        LogStore.i("BrowserRelay", "自动打开 ${config.name}，等待视频 WebView")
+        val deadline = System.currentTimeMillis() + BROWSER_AUTO_ATTACH_TIMEOUT_MS
+        while (System.currentTimeMillis() < deadline) {
+            delay(200)
+            attached?.takeIf { it.second == config.id }?.let { return it }
+        }
+        throw WebAutomationException(
+            "webview_not_ready",
+            "已尝试自动打开 ${config.name}，但网页未在 ${BROWSER_AUTO_ATTACH_TIMEOUT_MS / 1000} 秒内就绪；请打开一次 MultiWeb 浏览器页"
+        )
+    }
+
+    private suspend fun evaluate(view: WebView, script: String): String =
+        withTimeoutOrNull(WEBVIEW_EVALUATE_TIMEOUT_MS) {
+            suspendCancellableCoroutine { cont ->
+                main.post {
+                    if (!cont.isActive) return@post
+                    if (!view.isAttachedToWindow) {
+                        cont.resume("")
+                        return@post
+                    }
+                    view.evaluateJavascript(script) { raw ->
+                        if (cont.isActive) cont.resume(decode(raw))
+                    }
+                }
+            }
+        } ?: ""
+    private fun decode(raw: String?): String = if (raw == null || raw == "null") "" else
+        runCatching { JSONArray("[$raw]").getString(0) }.getOrDefault(raw)
+
+    /**
+     * 美团（LongCat）视频生成：与 generateLongCat 同构。
+     * 模式检测「视频生成」tab → ProseMirror 输入 → .send-btn → 轮询视频 URL。
+     */
+    private suspend fun generateLongCatVideo(view: WebView, config: CustomWebProviderConfig, prompt: String, refImages: List<ChatAttachment> = emptyList()): List<String> {
+        android.util.Log.i("LongCatVideo", "generateLongCatVideo 入口 prompt=${prompt.take(40)} refImages=${refImages.size} config=${config.name}")
+        // 模式检测：切到「视频生成」技能
+        var mode = evaluate(view, """(()=>{
+            const visible=e=>e&&e.offsetParent!==null;
+            // LongCat 视频主页可能已展示视频结果（检测 video 元素或“生成视频”特征文案）
+            if([...document.querySelectorAll('video')].some(v=>v.offsetParent!==null))return 'active';
+            const exact=t=>[...document.querySelectorAll('body *')].find(e=>visible(e)&&(e.innerText||'').trim()===t);
+            if(exact('视频生成')?.closest('.agent-skills'))return 'active';
+            const item=exact('视频生成');
+            if(item){(item.closest('.v-checked-button')||item).click();return 'clicked'}
+            const more=exact('更多');
+            if(more){const box=more.closest('[data-more="true"]');(box?.querySelector('.van-popover__wrapper')||box||more).click();return 'opened'}
+            return 'missing'
+        })()""")
+        if (mode == "opened") {
+            delay(800)
+            mode = evaluate(view, """(()=>{const all=[...document.querySelectorAll('body *')].filter(e=>e.offsetParent!==null&&(e.innerText||'').trim()==='视频生成');const active=all.find(e=>e.closest('.agent-skills'));if(active)return 'active';const e=all[all.length-1];if(!e)return 'missing';(e.closest('.v-checked-button,[role="menuitem"]')||e).click();return 'clicked'})()""")
+        }
+        if (mode == "missing") {
+            // 兜底：找不到「视频生成」tab 时不强求，直接尝试输入提交（部分页面默认即视频技能）
+            android.util.Log.i("LongCatVideo", "未找到「视频生成」tab，尝试直接提交 mode=$mode")
+        }
+        android.util.Log.i("LongCatVideo", "模式检测结果 mode=$mode")
+        delay(350)
+        // 注入参考图（图生视频）：Longcat 视频界面同样有 #file-upload-gen_image input，与生图一致
+        if (refImages.isNotEmpty()) {
+            val inj = runCatching { JSONObject(evaluate(view, CustomWebImageAutomation.longCatRefImageScript(refImages))) }.getOrDefault(JSONObject())
+            if (!inj.optBoolean("ok")) {
+                LogStore.w("CustomWebVideo", "${config.name} 参考图注入失败: ${inj.optString("error", "unknown")}")
+            } else {
+                LogStore.i("CustomWebVideo", "${config.name} 已注入 ${refImages.size} 张参考图")
+                delay(600)  // 等网页解析参考图缩略图
+            }
+        }
+        // 基线：提交前的视频 URL 快照，避免把历史视频当本次结果
+        val baseline = evaluate(view, "JSON.stringify([...document.querySelectorAll('video')].map(v=>v.currentSrc||v.src).filter(Boolean))")
+        val baselineSet = runCatching { JSONArray(baseline) }.getOrDefault(JSONArray()).let { a ->
+            (0 until a.length()).map { a.optString(it) }.toSet()
+        }
+        android.util.Log.i("LongCatVideo", "baseline 视频数=${baselineSet.size}")
+        // 提交：LongCat 统一 ProseMirror 输入框 + .send-btn
+        val submitted = evaluate(view, """
+            (()=>{try{const e=document.querySelector('[contenteditable="true"][role="textbox"]');const b=document.querySelector('.send-btn');if(!e)return 'input_not_found';if(!b)return 'send_not_found';e.focus();e.innerHTML='<p></p>';e.querySelector('p').textContent=${JSONObject.quote(prompt)};e.dispatchEvent(new InputEvent('input',{bubbles:true,inputType:'insertText',data:${JSONObject.quote(prompt)}}));b.click();return 'ok'}catch(x){return String(x)}})()
+        """.trimIndent())
+        android.util.Log.i("LongCatVideo", "提交结果 submitted=$submitted")
+        if (submitted != "ok") throw WebAutomationException("video_submit_failed", "${config.name} 视频生成提交失败：$submitted")
+        // 视频生成通常 1~5 分钟，LongCat 高峰期可能更久（实测 5 分钟以上），放宽到 10 分钟
+        val deadline = System.currentTimeMillis() + 600_000
+        while (System.currentTimeMillis() < deadline) {
+            delay(800)
+            val state = evaluate(view, """
+                (()=>{try{
+                  const vids=[...document.querySelectorAll('video')].filter(v=>v.offsetParent!==null);
+                  // LongCat 视频最终 URL 含 execute-result 且已完整加载（duration>0 或 readyState>=3）
+                  const srcs=vids.filter(v=>(v.currentSrc||v.src||'').includes('execute-result')&&(v.duration>0||v.readyState>=2))
+                    .map(v=>v.currentSrc||v.src||'').filter(Boolean);
+                  const links=[...document.querySelectorAll('a[href*=".mp4"],video source[src*=".mp4"]')]
+                    .map(e=>e.href||e.getAttribute('src')||'').filter(Boolean);
+                  const bodyText=(document.body.innerText||'');
+                  const err=/生成失败|视频生成失败|网络错误|too many requests|rate limit/i.test(bodyText);
+                  return JSON.stringify({srcs:[...new Set([...srcs,...links])],err});
+                }catch(e){return JSON.stringify({srcs:[],err:false})}})()
+            """.trimIndent())
+            val obj = runCatching { JSONObject(state) }.getOrDefault(JSONObject())
+            if (obj.optBoolean("err")) {
+                throw WebAutomationException("upstream_page_error", "${config.name} 网页提示生成失败")
+            }
+            val srcs = runCatching {
+                val arr = obj.optJSONArray("srcs") ?: JSONArray()
+                (0 until arr.length()).map { arr.optString(it) }.filter { it.isNotBlank() && it !in baselineSet }
+            }.getOrDefault(emptyList())
+            android.util.Log.i("LongCatVideo", "轮询: 视频源=${srcs.size}, 各src前缀=${srcs.map { it.take(40) }.joinToString("|")}")
+            if (srcs.isNotEmpty()) {
+                // 缓存视频：blob → data URL / http → 本地存储，返回可访问 URL
+                val cached = srcs.take(4).mapNotNull { url ->
+                    runCatching { cacheLongCatVideo(view, url) }.onFailure { error ->
+                        android.util.Log.e("LongCatVideo", "${config.name} 视频缓存失败 url=${url.take(120)}: ${error.message}")
+                    }.getOrNull()
+                }
+                if (cached.isNotEmpty()) return cached
+                throw WebAutomationException("video_download_failed", "${config.name} 找到视频地址但下载内容无效")
+            }
+        }
+        throw WebAutomationException("video_timeout", "${config.name} 网页视频生成等待超时")
+    }
+
+    /** 拒绝 HTML/JSON 错误页，接受 MP4 ftyp、WebM EBML 和常见 MPEG-TS。 */
+    private fun isVideoBytes(bytes: ByteArray): Boolean {
+        if (bytes.size < 12) return false
+        val ascii = bytes.copyOfRange(0, minOf(bytes.size, 64)).toString(Charsets.US_ASCII)
+        val mp4 = bytes.size >= 8 && String(bytes, 4, 4, Charsets.US_ASCII) == "ftyp"
+        val webm = bytes.size >= 4 && bytes[0] == 0x1A.toByte() && bytes[1] == 0x45.toByte() && bytes[2] == 0xDF.toByte() && bytes[3] == 0xA3.toByte()
+        val mpegTs = bytes[0] == 0x47.toByte()
+        return (mp4 || webm || mpegTs) && !ascii.trimStart().startsWith("<") && !ascii.trimStart().startsWith("{")
+    }
+
+    /** 将 LongCat 视频 URL 下载到本地缓存，返回 file:// URI（WebView loadUrl 可播放）。 */
+    private suspend fun cacheLongCatVideo(view: WebView, url: String): String {
+        if (!url.startsWith("blob:", ignoreCase = true)) {
+            return withContext(Dispatchers.IO) {
+                val cookies = suspendCancellableCoroutine { cont ->
+                    main.post { if (cont.isActive) cont.resume(CookieManager.getInstance().getCookie(url).orEmpty()) }
+                }
+                val request = Request.Builder().url(url).apply {
+                    if (cookies.isNotBlank()) header("Cookie", cookies)
+                    header("Referer", "https://longcat.chat/")
+                    header("User-Agent", "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/120 Mobile Safari/537.36")
+                }.build()
+                client.newCall(request).execute().use { response ->
+                    val contentType = response.header("Content-Type").orEmpty()
+                    val bytes = response.body?.bytes() ?: ByteArray(0)
+                    val header = bytes.take(12).joinToString(" ") { "%02x".format(it) }
+                    android.util.Log.i("LongCatVideo", "下载响应 url=${url.take(120)} code=${response.code} type=$contentType size=${bytes.size} header=$header")
+                    if (!response.isSuccessful) {
+                        throw WebAutomationException("video_download_failed", "LongCat 视频下载失败 HTTP ${response.code}")
+                    }
+                    if (!isVideoBytes(bytes)) {
+                        throw WebAutomationException("video_download_invalid", "LongCat 返回内容不是有效视频 type=$contentType size=${bytes.size} header=$header")
+                    }
+                    val dir = File(view.context.cacheDir, "web-video").apply { mkdirs() }
+                    val file = File(dir, "${UUID.randomUUID()}.mp4")
+                    file.outputStream().use { it.write(bytes) }
+                    android.util.Log.i("LongCatVideo", "视频已缓存到 ${file.absolutePath} size=${bytes.size}")
+                    Uri.fromFile(file).toString()
+                }
+            }
+        }
+        val dataUrl = evaluate(view, """
+            (()=>new Promise(resolve=>{
+                fetch(${JSONObject.quote(url)}).then(r=>r.blob()).then(blob=>{
+                    const reader=new FileReader();
+                    reader.onload=()=>resolve(reader.result||'');
+                    reader.onerror=()=>resolve('');
+                    reader.readAsDataURL(blob);
+                }).catch(()=>resolve(''));
+            }))()
+        """.trimIndent())
+        if (!dataUrl.startsWith("data:", ignoreCase = true)) {
+            throw WebAutomationException("video_download_failed", "LongCat blob 视频读取失败")
+        }
+        return withContext(Dispatchers.IO) {
+            val b64 = dataUrl.substringAfter("base64,")
+            val bytes = android.util.Base64.decode(b64, android.util.Base64.NO_WRAP)
+            val header = bytes.take(12).joinToString(" ") { "%02x".format(it) }
+            android.util.Log.i("LongCatVideo", "blob 下载 size=${bytes.size} header=$header")
+            if (!isVideoBytes(bytes)) {
+                throw WebAutomationException("video_download_invalid", "LongCat blob 内容不是有效视频 size=${bytes.size} header=$header")
+            }
+            val dir = File(view.context.cacheDir, "web-video").apply { mkdirs() }
+            val file = File(dir, "${UUID.randomUUID()}.mp4")
+            file.outputStream().use { it.write(bytes) }
+            android.util.Log.i("LongCatVideo", "blob 视频已缓存到 ${file.absolutePath} size=${bytes.size}")
+            Uri.fromFile(file).toString()
+        }
+    }
 }
 
 private const val WEBVIEW_EVALUATE_TIMEOUT_MS = 15_000L

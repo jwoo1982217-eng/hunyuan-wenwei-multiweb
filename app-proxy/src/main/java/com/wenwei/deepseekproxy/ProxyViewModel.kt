@@ -50,12 +50,14 @@ import com.wenwei.deepseekproxy.proxy.CustomWebProviderConfig
 import com.wenwei.deepseekproxy.proxy.CustomWebProviderRegistry
 import com.wenwei.deepseekproxy.proxy.CustomWebProviderStore
 import com.wenwei.deepseekproxy.proxy.customWebImageModelId
+import com.wenwei.deepseekproxy.proxy.customWebVideoModelId
 
 /** 一条聊天消息：可含文本和/或图片 URL 列表。 */
 data class ChatMessageItem(
     val role: String,
     val text: String = "",
-    val images: List<String> = emptyList()
+    val images: List<String> = emptyList(),
+    val videos: List<String> = emptyList()
 )
 
 private data class RealAttachment(val name: String, val mime: String, val dataUrl: String, val text: String?)
@@ -90,9 +92,10 @@ class ProxyViewModel(app: Application) : AndroidViewModel(app) {
     private val gatewayStartMutex = Mutex()
     private val http = OkHttpClient.Builder()
         .connectTimeout(20, java.util.concurrent.TimeUnit.SECONDS)
-        // ChatGPT Web image generation can legitimately finish after two minutes.
-        // Keep the local relay client alive longer than the web automation deadline.
-        .readTimeout(300, java.util.concurrent.TimeUnit.SECONDS)
+        // ChatGPT Web image generation can legitimately finish after two minutes,
+        // and WebView video generation can take up to ten. Keep the local relay
+        // client alive longer than the web automation deadline.
+        .readTimeout(600, java.util.concurrent.TimeUnit.SECONDS)
         .build()
     private val webSessionStore = WebSessionStore(app)
     private val apiProviderStore = ApiProviderStore(app)
@@ -102,6 +105,7 @@ class ProxyViewModel(app: Application) : AndroidViewModel(app) {
     val webSessionStatus = MutableStateFlow<Map<String, String>>(emptyMap())
     val webModels = MutableStateFlow(buildWebModels(webSessions.value))
     val imageModel = MutableStateFlow(prefs.getString("image_model", "gpt-image-2") ?: "gpt-image-2")
+    val videoModel = MutableStateFlow(prefs.getString("video_model", "") ?: "")
     val apiProviders = MutableStateFlow(apiProviderStore.load())
     val apiProviderStatus = MutableStateFlow<Map<String, String>>(emptyMap())
     val providerModels = MutableStateFlow<List<ProviderModel>>(emptyList())
@@ -115,6 +119,21 @@ class ProxyViewModel(app: Application) : AndroidViewModel(app) {
         ProxyServer.setWebSessions(webSessions.value)
         CustomWebProviderRegistry.set(customWebProviders.value)
         refreshProviderRegistry()
+        
+        // 验证保存的 imageModel 是否有效，如果无效则重置为第一个可用的生图模型
+        val savedImageModel = imageModel.value
+        val isValid = ProviderCatalog.find(savedImageModel)?.let { 
+            ProviderCapability.IMAGE_GENERATION in it.capabilities 
+        } ?: false
+        
+        if (!isValid) {
+            val fallback = ProviderCatalog.imageModels.firstOrNull()?.publicModelId ?: "gpt-image-2"
+            android.util.Log.w("ProxyViewModel", "保存的 imageModel=$savedImageModel 无效，回退到 $fallback")
+            setImageModel(fallback)
+        } else {
+            android.util.Log.i("ProxyViewModel", "imageModel=$savedImageModel 验证通过")
+        }
+        
         if (imageModel.value == "image-web" &&
             customWebProviders.value.any { it.modelId == "image-dddd-image-web" }
         ) {
@@ -128,13 +147,21 @@ class ProxyViewModel(app: Application) : AndroidViewModel(app) {
     private fun buildApiModels(configs: List<ApiProviderConfig>): List<ProviderModel> = configs
         .filter { it.enabled }.flatMap { config ->
             val prefix = providerSlug(config)
-            (config.chatModels + config.imageModels).distinct().map { upstream ->
+            (config.chatModels + config.imageModels + config.videoModels).distinctBy { it.lowercase() }.map { upstream ->
+                val inChat = upstream in config.chatModels
+                val inImage = upstream in config.imageModels
+                val inVideo = upstream in config.videoModels
+                // 聊天模型名含 image（gpt-image / sdxl-image / flux-image 等）自动归生图，
+                // 不再出现在聊天列表里（分开放）。
+                val isImageName = Regex("image|dall|flux|sdxl|stable[-_]?diffusion|seedream|imagen|cogview|draw|绘画|生图|图生图", RegexOption.IGNORE_CASE)
+                    .containsMatchIn(upstream)
                 val capabilities = buildSet {
-                    if (upstream in config.chatModels) {
+                    if (inChat && !isImageName) {
                         add(ProviderCapability.CHAT)
                         add(ProviderCapability.STREAMING)
                     }
-                    if (upstream in config.imageModels) add(ProviderCapability.IMAGE_GENERATION)
+                    if (inImage || isImageName) add(ProviderCapability.IMAGE_GENERATION)
+                    if (inVideo) add(ProviderCapability.VIDEO_GENERATION)
                 }
                 ProviderModel(
                     publicModelId = "$prefix--$upstream", displayName = upstream,
@@ -176,7 +203,7 @@ class ProxyViewModel(app: Application) : AndroidViewModel(app) {
     /** Lets OpenAI-compatible clients use the upstream model id directly. */
     private fun buildPlainModelAliases(configs: List<ApiProviderConfig>): List<ProviderModel> {
         val enabled = configs.filter { it.enabled }
-        val upstreamIds = enabled.flatMap { it.chatModels + it.imageModels }
+        val upstreamIds = enabled.flatMap { it.chatModels + it.imageModels + it.videoModels }
             .distinctBy(String::lowercase)
         return upstreamIds.mapNotNull { upstream ->
             if (ProviderCatalog.models.any { it.publicModelId.equals(upstream, ignoreCase = true) }) {
@@ -188,13 +215,21 @@ class ProxyViewModel(app: Application) : AndroidViewModel(app) {
             val imageProviders = enabled.filter { config ->
                 config.imageModels.any { it.equals(upstream, ignoreCase = true) }
             }
-            val providers = (chatProviders + imageProviders).distinctBy { it.id }
+            val videoProviders = enabled.filter { config ->
+                config.videoModels.any { it.equals(upstream, ignoreCase = true) }
+            }
+            val providers = (chatProviders + imageProviders + videoProviders).distinctBy { it.id }
+            // 聊天模型名含 image 自动归生图（分开放），不再作为聊天模型出现
+            val isImageName = chatProviders.isNotEmpty() &&
+                Regex("image|dall|flux|sdxl|stable[-_]?diffusion|seedream|imagen|cogview|draw|绘画|生图|图生图", RegexOption.IGNORE_CASE)
+                    .containsMatchIn(upstream)
             val capabilities = buildSet {
-                if (chatProviders.isNotEmpty()) {
+                if (chatProviders.isNotEmpty() && !isImageName) {
                     add(ProviderCapability.CHAT)
                     add(ProviderCapability.STREAMING)
                 }
-                if (imageProviders.isNotEmpty()) add(ProviderCapability.IMAGE_GENERATION)
+                if (imageProviders.isNotEmpty() || isImageName) add(ProviderCapability.IMAGE_GENERATION)
+                if (videoProviders.isNotEmpty()) add(ProviderCapability.VIDEO_GENERATION)
             }
             ProviderModel(
                 publicModelId = upstream,
@@ -230,12 +265,20 @@ class ProxyViewModel(app: Application) : AndroidViewModel(app) {
                         providerType = WebProviderType.CUSTOM_WEB,
                         capabilities = setOf(ProviderCapability.IMAGE_GENERATION),
                         accountId = config.id,
+                    ),
+                    ProviderModel(
+                        publicModelId = customWebVideoModelId(config),
+                        displayName = "${config.name} 视频",
+                        providerType = WebProviderType.CUSTOM_WEB,
+                        capabilities = setOf(ProviderCapability.VIDEO_GENERATION),
+                        accountId = config.id,
                     )
                 )
             } else listOf(primary)
         }
-        providerModels.value = webModels.value + customModels + buildApiModels(apiProviders.value) +
-            buildPlainModelAliases(apiProviders.value) + buildAutoModels(apiProviders.value)
+        providerModels.value = (webModels.value + customModels + buildApiModels(apiProviders.value) +
+            buildPlainModelAliases(apiProviders.value) + buildAutoModels(apiProviders.value))
+            .distinctBy { it.publicModelId }
         ProviderCatalog.setRuntimeModels(providerModels.value)
     }
 
@@ -299,17 +342,25 @@ class ProxyViewModel(app: Application) : AndroidViewModel(app) {
             if (result.success && syncModels) {
                 val selectedChatBelongsToProvider = ProviderCatalog.find(chatModel.value)?.accountId == config.id
                 val selectedImageBelongsToProvider = ProviderCatalog.find(imageModel.value)?.accountId == config.id
+                // 归并规则：聊天模型里名字含 image 的模型自动挪到生图模型（分开放），
+                // 名字含 video 的挪到视频模型，避免「含 image/video 的模型留在聊天列表」。
+                fun isImageModel(id: String): Boolean =
+                    id.contains("image", ignoreCase = true) ||
+                        Regex("dall|flux|sdxl|stable[-_]?diffusion|seedream|imagen|cogview", RegexOption.IGNORE_CASE).containsMatchIn(id)
+                fun isVideoModel(id: String): Boolean =
+                    id.contains("video", ignoreCase = true) ||
+                        Regex("sora|kling|wanx|veo|t2v|v2v|text[-_]?to[-_]?video|animate|cogvideo", RegexOption.IGNORE_CASE).containsMatchIn(id)
+                val mergedChat = (config.chatModels + result.chatModels).distinct()
+                val movedToImage = mergedChat.filter(::isImageModel)
+                val movedToVideo = mergedChat.filter(::isVideoModel).filterNot(::isImageModel)
                 val updated = config.copy(
                     // A number of compatible relays expose an incomplete /models
                     // response and do not declare image capabilities. Refreshing
                     // must therefore be additive: never make a user's saved model
                     // disappear merely because one discovery response omitted it.
-                    chatModels = (config.chatModels + result.chatModels).distinct(),
-                    imageModels = if (CloudflareWorkersAiClient.matches(config)) {
-                        (config.imageModels + result.imageModels).distinct()
-                    } else {
-                        (config.imageModels + result.imageModels).distinct()
-                    }
+                    chatModels = mergedChat.filterNot { isImageModel(it) || isVideoModel(it) },
+                    imageModels = (config.imageModels + result.imageModels + movedToImage).distinct(),
+                    videoModels = (config.videoModels + result.videoModels + movedToVideo).distinct()
                 )
                 apiProviderStore.save(updated)
                 apiProviders.value = apiProviderStore.load()
@@ -321,7 +372,7 @@ class ProxyViewModel(app: Application) : AndroidViewModel(app) {
                     updated.imageModels.firstOrNull()?.let { setImageModel("${providerSlug(updated)}--$it") }
                 }
                 apiProviderStatus.value = apiProviderStatus.value + (config.id to
-                    "已同步：聊天 ${updated.chatModels.size} 个，生图 ${updated.imageModels.size} 个（保留原配置）")
+                    "已同步：聊天 ${updated.chatModels.size} 个，生图 ${updated.imageModels.size} 个，视频 ${updated.videoModels.size} 个（保留原配置）")
             } else {
                 apiProviderStatus.value = apiProviderStatus.value + (config.id to result.message)
             }
@@ -365,6 +416,11 @@ class ProxyViewModel(app: Application) : AndroidViewModel(app) {
     fun setImageModel(model: String) {
         imageModel.value = model
         prefs.edit().putString("image_model", model).apply()
+    }
+
+    fun setVideoModel(model: String) {
+        videoModel.value = model
+        prefs.edit().putString("video_model", model).apply()
     }
 
     fun testWebSession(session: SavedWebSession) {
@@ -779,19 +835,53 @@ class ProxyViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /** 生图测试：按 imageModel 调用本地 /v1/images/generations。 */
-    fun generateImage() {
-        val prompt = chatInput.value
-        if (prompt.isBlank()) return
+    fun generateImage(prompt: String, attachmentUris: List<Uri> = emptyList()) {
+        if (prompt.isBlank() && attachmentUris.isEmpty()) return
         chatInput.value = ""
-        chatMessages.value = chatMessages.value + ChatMessageItem("user", "【生图】$prompt")
-        LogStore.i("App", "生图请求: ${prompt.take(80)} (model=${imageModel.value}, size=${imageSize.value})")
+        val images = attachmentUris.mapNotNull { uri ->
+            runCatching { 
+                readAttachment(uri) 
+            }.onFailure { 
+                LogStore.e("App", "生图读取附件失败 uri=$uri: ${it.message}")
+            }.getOrNull()
+        }.filter { it.mime.startsWith("image/") }
+        LogStore.i("App", "生图附件: attachmentUris=${attachmentUris.size}, 读取成功=${images.size}, dataUrl前20=${images.firstOrNull()?.dataUrl?.take(20)}")
+        chatMessages.value = chatMessages.value + ChatMessageItem(
+            "user", 
+            "【生图】$prompt",
+            images = images.map { it.dataUrl }
+        )
+        val allImageModels = ProviderCatalog.imageModels.map { "${it.publicModelId}(${it.providerType.name})" }.joinToString(", ")
+        android.util.Log.i("ImageGen", "生图请求: ${prompt.take(80)} (model=${imageModel.value}, size=${imageSize.value}, 参考图=${images.size})")
+        android.util.Log.i("ImageGen", "当前可用生图模型: $allImageModels")
 
         val endpoint = "http://127.0.0.1:${port.value}/v1/images/generations"
+        android.util.Log.i("ImageGen", "准备构造生图请求 body, imageModel.value=${imageModel.value}")
         val body = JSONObject().apply {
             put("model", imageModel.value)
             put("prompt", prompt)
             put("size", imageSize.value)
             put("n", 1)
+            if (images.isNotEmpty()) {
+                val arr = JSONArray()
+                for (img in images) {
+                    val b64 = img.dataUrl.substringAfter("base64,", "")
+                    val decoded = runCatching { Base64.decode(b64, Base64.NO_WRAP) }.getOrNull()
+                    val bounds = decoded?.let {
+                        val opts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                        BitmapFactory.decodeByteArray(it, 0, it.size, opts)
+                        opts
+                    }
+                    arr.put(JSONObject().apply {
+                        put("name", img.name)
+                        put("mime", img.mime)
+                        put("data", b64)
+                        put("width", bounds?.outWidth ?: 0)
+                        put("height", bounds?.outHeight ?: 0)
+                    })
+                }
+                put("image_data", arr)
+            }
         }.toString()
 
         viewModelScope.launch(Dispatchers.IO) {
@@ -834,6 +924,89 @@ class ProxyViewModel(app: Application) : AndroidViewModel(app) {
             } catch (e: Exception) {
                 LogStore.e("App", "generateImage 异常: ${e.stackTraceToString()}")
                 chatMessages.value = chatMessages.value + ChatMessageItem("assistant", "⚠️ 生图错误: ${e.localizedMessage}")
+            }
+        }
+    }
+
+    /** 视频生成：调用本地 /v1/videos/generations（自定义 Web WebView 驱动）。 */
+    fun generateVideo(prompt: String, attachmentUris: List<Uri> = emptyList()) {
+        if (prompt.isBlank() && attachmentUris.isEmpty()) return
+        chatInput.value = ""
+        val images = attachmentUris.mapNotNull(::readAttachment).filter { it.mime.startsWith("image/") }
+        chatMessages.value = chatMessages.value + ChatMessageItem(
+            "user",
+            "【生成视频】$prompt",
+            images = images.map { it.dataUrl }
+        )
+        LogStore.i("App", "视频请求: ${prompt.take(80)} (model=${videoModel.value}, 参考图=${images.size})")
+
+        val endpoint = "http://127.0.0.1:${port.value}/v1/videos/generations"
+        val body = JSONObject().apply {
+            put("model", videoModel.value)
+            put("prompt", prompt)
+            put("n", 1)
+            if (images.isNotEmpty()) {
+                val arr = JSONArray()
+                for (img in images) {
+                    val b64 = img.dataUrl.substringAfter("base64,", "")
+                    val decoded = runCatching { Base64.decode(b64, Base64.NO_WRAP) }.getOrNull()
+                    val bounds = decoded?.let {
+                        val opts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                        BitmapFactory.decodeByteArray(it, 0, it.size, opts)
+                        opts
+                    }
+                    arr.put(JSONObject().apply {
+                        put("name", img.name)
+                        put("mime", img.mime)
+                        put("data", b64)
+                        put("width", bounds?.outWidth ?: 0)
+                        put("height", bounds?.outHeight ?: 0)
+                    })
+                }
+                put("image_data", arr)
+            }
+        }.toString()
+
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                ensureLocalGatewayRunning()
+                val req = Request.Builder().url(endpoint)
+                    .post(body.toRequestBody("application/json".toMediaType()))
+                    .addHeader("Content-Type", "application/json")
+                    .addHeader("Authorization", "Bearer ${localBearerToken.value}")
+                    .build()
+                http.newCall(req).execute().use { resp ->
+                    val respBody = resp.body!!.string()
+                    if (!resp.isSuccessful) {
+                        val err = try {
+                            val error = JSONObject(respBody).opt("error")
+                            when (error) {
+                                is JSONObject -> error.optString("message")
+                                    .ifBlank { error.optString("code") }
+                                    .ifBlank { error.toString().take(300) }
+                                is String -> error
+                                else -> respBody.take(300)
+                            }
+                        } catch (_: Exception) {
+                            respBody.take(300)
+                        }
+                        LogStore.e("App", "视频生成失败 HTTP ${resp.code}: $err")
+                        chatMessages.value = chatMessages.value + ChatMessageItem("assistant", "⚠️ 视频生成错误: $err")
+                        return@use
+                    }
+                    val data = JSONObject(respBody).optJSONArray("data") ?: JSONArray()
+                    val urls = (0 until data.length()).mapNotNull { i ->
+                        data.optJSONObject(i)?.optString("url", "")
+                    }.filter { it.isNotBlank() }
+                    if (urls.isEmpty()) {
+                        chatMessages.value = chatMessages.value + ChatMessageItem("assistant", "⚠️ 视频生成未返回结果")
+                    } else {
+                        chatMessages.value = chatMessages.value + ChatMessageItem("assistant", videos = urls)
+                    }
+                }
+            } catch (e: Exception) {
+                LogStore.e("App", "generateVideo 异常: ${e.stackTraceToString()}")
+                chatMessages.value = chatMessages.value + ChatMessageItem("assistant", "⚠️ 视频生成错误: ${e.localizedMessage}")
             }
         }
     }

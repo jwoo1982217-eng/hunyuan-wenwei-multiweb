@@ -12,7 +12,7 @@ enum class WebProviderType(
 ) {
     CNB("混元 / CNB", null, emptyList()),
     DOUBAO_WEB(
-        "豆包 Web",
+        "豆包",
         "https://www.doubao.com/chat/",
         listOf("https://www.doubao.com", "https://doubao.com")
     ),
@@ -42,7 +42,7 @@ enum class WebProviderType(
         listOf("https://www.kimi.com", "https://kimi.com")
     ),
     DEEPSEEK_WEB(
-        "DeepSeek Web",
+        "DeepSeek",
         "https://chat.deepseek.com/",
         listOf("https://chat.deepseek.com", "https://deepseek.com")
     ),
@@ -92,7 +92,7 @@ enum class WebProviderType(
     val supportsWebLogin: Boolean get() = loginUrl != null
 }
 
-enum class ProviderCapability { CHAT, STREAMING, IMAGE_GENERATION, VISION }
+enum class ProviderCapability { CHAT, STREAMING, IMAGE_GENERATION, VISION, VIDEO_GENERATION }
 
 data class ProviderModel(
     val publicModelId: String,
@@ -111,6 +111,8 @@ data class ProviderModel(
         if (providerType == WebProviderType.CNB) return true
         // 豆包 API 客户端：图片经 upload_image 上传图床后以 attachment_block 发送。
         if (providerType == WebProviderType.DOUBAO_WEB) return true
+        // DeepSeek 网页端支持识图：图片经 /api/v0/file/upload_file 上传 → ref_file_ids 传入 completion。
+        if (providerType == WebProviderType.DEEPSEEK_WEB) return true
         // WebView 浏览器中继类（千问国际/MiniMax/MiMo/Perplexity/Z.ai/Arena/Longcat
         // 等内置中继 + 自定义 Web）统一走通用 file input 注入，任意账号可用。
         if (providerType == WebProviderType.CUSTOM_WEB || isBuiltInBrowserRelay(providerType)) return true
@@ -161,6 +163,12 @@ object ProviderCatalog {
             "豆包生图",
             WebProviderType.DOUBAO_WEB,
             setOf(ProviderCapability.IMAGE_GENERATION)
+        ),
+        ProviderModel(
+            "doubao-video-web",
+            "豆包视频",
+            WebProviderType.DOUBAO_WEB,
+            setOf(ProviderCapability.VIDEO_GENERATION)
         ),
         ProviderModel(
             "chatgpt-web",
@@ -290,12 +298,16 @@ object ProviderCatalog {
     )
 
     val enabledModels: List<ProviderModel> get() =
-        models.filter { it.enabled } + runtimeModels.filter { it.enabled }
+        (models.filter { it.enabled } + runtimeModels.filter { it.enabled })
+            .distinctBy { it.publicModelId.lowercase() }
     val chatModels: List<ProviderModel> get() = enabledModels.filter {
         ProviderCapability.CHAT in it.capabilities
     }
     val imageModels: List<ProviderModel> get() = enabledModels.filter {
         ProviderCapability.IMAGE_GENERATION in it.capabilities
+    }
+    val videoModels: List<ProviderModel> get() = enabledModels.filter {
+        ProviderCapability.VIDEO_GENERATION in it.capabilities
     }
 
     fun find(publicModelId: String): ProviderModel? = enabledModels.firstOrNull {

@@ -1,6 +1,7 @@
 package com.wenwei.deepseekproxy.proxy
 
 import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.MultipartBody
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -25,8 +26,7 @@ object DeepSeekClient {
         .build()
 
     private const val BASE = "https://chat.deepseek.com"
-    const val UA = "Mozilla/5.0 (Linux; Android 15; V2352A Build/AP3A.240905.015.A2) " +
-            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.6478.71 Mobile Safari/537.36"
+    const val UA = "Mozilla/5.0 (Linux; Android 13; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
 
     /** Bearer token，由 ProxyServer 在每次请求前注入（来自 UI 设置的凭证）。 */
     var token: String = ""
@@ -34,14 +34,14 @@ object DeepSeekClient {
     private fun newRequestBuilder(path: String): Request.Builder {
         return Request.Builder().url(BASE + path)
             .header("authorization", token)
-            .header("content-type", "application/json")
             .header("user-agent", UA)
             .header("origin", BASE)
             .header("referer", BASE + "/")
-            .header("x-client-version", "2.2.0")
+            .header("x-client-version", "2.3.0")
             .header("x-client-platform", "web")
             .header("x-client-locale", "zh_CN")
             .header("x-client-bundle-id", "com.deepseek.chat")
+            .header("x-client-timezone-offset", "28800")
             .header("accept", "*/*")
     }
 
@@ -60,6 +60,7 @@ object DeepSeekClient {
 
     fun createSession(): String {
         val d = postJson("/api/v0/chat_session/create", JSONObject())
+        android.util.Log.i("DSVision", "create_session 响应: " + d.toString().take(1000))
         return d.getJSONObject("data").getJSONObject("biz_data")
             .getJSONObject("chat_session").getString("id")
     }
@@ -117,23 +118,108 @@ object DeepSeekClient {
     }
 
     /**
+     * 上传图片（识图/VISION）：multipart 上传 → file_id（供 chatCompletion 的 ref_file_ids 引用）。
+     * 流程：create_pow_challenge(/api/v0/file/upload_file) → DeepSeekPow.solve → 带 x-ds-pow-response 上传
+     * → fetch_files 轮询确认 status=SUCCESS（网页端同款，PENDING 时 completion 不识别）。
+     */
+    suspend fun uploadImage(bytes: ByteArray, fileName: String = "image.png"): String {
+        // 1. POW challenge（与 completion 同款）
+        val challenge = createPowChallenge("/api/v0/file/upload_file")
+        val answer = DeepSeekPow.solve(
+            challenge.challenge, challenge.salt, challenge.expireAt, challenge.difficulty
+        )
+        val powHeader = buildPowHeader(challenge, answer, "/api/v0/file/upload_file")
+
+        // 2. multipart 上传（字段名 file）
+        val mime = when {
+            fileName.endsWith(".png", true) -> "image/png"
+            fileName.endsWith(".webp", true) -> "image/webp"
+            fileName.endsWith(".gif", true) -> "image/gif"
+            else -> "image/jpeg"
+        }
+        val body = MultipartBody.Builder().setType(MultipartBody.FORM)
+            .addFormDataPart("file", fileName, bytes.toRequestBody(mime.toMediaType()))
+            .build()
+        val req = newRequestBuilder("/api/v0/file/upload_file")
+            .post(body)
+            .header("x-ds-pow-response", powHeader)
+            .header("x-file-size", bytes.size.toString())
+            .header("x-model-type", "vision")
+            .header("x-thinking-enabled", "0")
+            .header("accept", "*/*")
+            .build()
+        val fileId = client.newCall(req).execute().use { resp ->
+            val text = resp.body?.string() ?: ""
+            if (!resp.isSuccessful) {
+                android.util.Log.e("DSVision", "上传 HTTP ${resp.code}: ${text.take(200)}")
+                throw RuntimeException("DeepSeek 上传图片 HTTP ${resp.code}: ${text.take(300)}")
+            }
+            android.util.Log.i("DSVision", "上传响应: " + text)
+            runCatching {
+                JSONObject(text).getJSONObject("data").getJSONObject("biz_data").getString("id")
+            }.getOrNull()
+                ?: throw RuntimeException("DeepSeek 上传图片无 file_id: ${text.take(300)}")
+        }
+        android.util.Log.i("DSVision", "上传成功 fileId=$fileId，开始 fetch_files 轮询")
+        // 3. fetch_files 轮询确认 SUCCESS + audit_result=pass（网页端在审核通过后才提交 completion）
+        for (attempt in 0 until 40) {
+            val info = fetchFileStatus(fileId)
+            android.util.Log.i("DSVision", "fetch_files attempt=$attempt state=$info")
+            if (info == "SUCCESS_PASS") break
+            if (info.startsWith("FAILED") || info.startsWith("ERROR")) {
+                throw RuntimeException("DeepSeek 图片处理失败: $info")
+            }
+            kotlinx.coroutines.delay(500)
+        }
+        return fileId
+    }
+
+    /** 查询文件状态（GET /api/v0/file/fetch_files?file_ids=...），返回 STATUS_AUDIT。 */
+    private fun fetchFileStatus(fileId: String): String {
+        return runCatching {
+            val req = newRequestBuilder("/api/v0/file/fetch_files?file_ids=$fileId")
+                .get()
+                .build()
+            client.newCall(req).execute().use { resp ->
+                val text = resp.body?.string() ?: ""
+                if (!resp.isSuccessful) return@use ""
+                android.util.Log.i("DSVision", "fetch_files 响应: " + text.take(600))
+                runCatching {
+                    val file = JSONObject(text).getJSONObject("data").getJSONObject("biz_data")
+                        .getJSONArray("files").optJSONObject(0) ?: return@runCatching ""
+                    val status = file.optString("status", "")
+                    val audit = file.optString("audit_result", "")
+                    when {
+                        status == "SUCCESS" && audit == "pass" -> "SUCCESS_PASS"
+                        status == "FAILED" || status == "ERROR" -> "$status:$audit"
+                        else -> "$status:$audit"
+                    }
+                }.getOrDefault("")
+            }
+        }.getOrDefault("")
+    }
+
+    /**
      * 调用 /api/v0/chat/completion（流式 SSE）。返回的 Response 由调用方读取并关闭。
      * 若非 SSE（如鉴权失败），会读取并抛出异常。
      */
     fun chatCompletion(
-        sessionId: String, prompt: String, powHeader: String, modelType: String = "default"
+        sessionId: String, prompt: String, powHeader: String, modelType: String? = "default",
+        refFileIds: List<String> = emptyList(),
+        parentMessageId: Int? = null,
     ): Response {
         val body = JSONObject().apply {
             put("chat_session_id", sessionId)
-            put("parent_message_id", JSONObject.NULL)
-            put("model_type", modelType)
+            put("parent_message_id", parentMessageId ?: JSONObject.NULL)
+            put("model_type", modelType ?: JSONObject.NULL)
             put("prompt", prompt)
-            put("ref_file_ids", JSONArray())
+            put("ref_file_ids", JSONArray().apply { refFileIds.forEach { put(it) } })
             put("thinking_enabled", false)
             put("search_enabled", false)
             put("action", JSONObject.NULL)
             put("preempt", false)
         }
+        android.util.Log.i("DSVision", "completion body: " + body.toString())
         val req = newRequestBuilder("/api/v0/chat/completion")
             .post(body.toString().toRequestBody("application/json".toMediaType()))
             .header("x-ds-pow-response", powHeader)
@@ -185,6 +271,10 @@ object DeepSeekClient {
             val t = line.trimStart()
             if (!t.startsWith("data:")) continue
             val data = t.substring(5).trim()
+            // 调试：打印原始 SSE data（识图回复结构排查用）
+            if (data.isNotEmpty() && data != "FINISHED") {
+                android.util.Log.d("DSVision", "SSE data: " + data.take(600))
+            }
             if (data.isEmpty() || data.startsWith("[") || data == "FINISHED") continue
             try {
                 val obj = JSONObject(data)
