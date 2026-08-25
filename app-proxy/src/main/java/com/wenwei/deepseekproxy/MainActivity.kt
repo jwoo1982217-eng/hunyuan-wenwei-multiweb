@@ -61,6 +61,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import com.wenwei.deepseekproxy.proxy.ApiProviderConfig
+import com.wenwei.deepseekproxy.proxy.ProviderCapability
 import com.wenwei.deepseekproxy.proxy.LogStore
 import com.wenwei.deepseekproxy.proxy.LocalGatewayTokenStore
 import com.wenwei.deepseekproxy.proxy.LocalGatewaySecurity
@@ -379,8 +380,8 @@ fun App(vm: ProxyViewModel) {
                     sessions = webSessions,
                     customProviders = customWebProviders,
                     sessionStatus = webSessionStatus,
-                    onSessionSaved = { provider, name, cookie, authToken, cookiesByOrigin ->
-                        vm.saveWebSession(provider, name, cookie, authToken, cookiesByOrigin)
+                    onSessionSaved = { provider, name, cookie, authToken, cookiesByOrigin, extraHeaders ->
+                        vm.saveWebSession(provider, name, cookie, authToken, cookiesByOrigin, extraHeaders)
                         if (provider == WebProviderType.DOUBAO_WEB) cookieText = cookie
                     },
                     onSessionDeleted = vm::deleteWebSession,
@@ -2168,7 +2169,7 @@ fun BrowserScreen(
     sessions: List<SavedWebSession>,
     customProviders: List<CustomWebProviderConfig>,
     sessionStatus: Map<String, String>,
-    onSessionSaved: (WebProviderType, String, String, String, Map<String, String>) -> Unit,
+    onSessionSaved: (WebProviderType, String, String, String, Map<String, String>, Map<String, String>) -> Unit,
     onSessionDeleted: (String) -> Unit,
     onSessionTest: (SavedWebSession) -> Unit,
     onSessionStatusChanged: (String, String) -> Unit,
@@ -2218,6 +2219,8 @@ fun BrowserScreen(
     var webViewGeneration by remember { mutableIntStateOf(0) }
     var pendingGeminiValidationSessionId by remember { mutableStateOf<String?>(null) }
     val capturedAuthorization = remember { AtomicReference("") }
+    // DeepSeek x-hif-leim 设备指纹（识图 completion 必需），onPageFinished 时从 localStorage 读取
+    val capturedDeepSeekFingerprint = remember { mutableStateOf<Map<String, String>>(emptyMap()) }
     val webViewInfo = remember {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             WebView.getCurrentWebViewPackage()?.let { "${it.packageName} ${it.versionName}" }
@@ -2247,6 +2250,7 @@ fun BrowserScreen(
                         pendingAccountName,
                         pendingCookie,
                         accessToken,
+                        emptyMap(),
                         emptyMap(),
                     )
                     toast = "已保存并验证 ChatGPT 登录会话"
@@ -2388,6 +2392,7 @@ fun BrowserScreen(
                                         provider = item
                                         activeCustomId = null
                                         capturedAuthorization.set("")
+                            capturedDeepSeekFingerprint.value = emptyMap()
                                         compatibilityMode = false
                                         url = item.loginUrl.orEmpty()
                                         accountName = ""
@@ -2546,8 +2551,12 @@ fun BrowserScreen(
                     if (token.isBlank()) {
                         toast = "尚未捕获授权：请登录 ${provider.displayName} 后先发送一条消息，再点保存会话"
                     } else {
-                        onSessionSaved(provider, accountName, cookies, token, emptyMap())
-                        toast = "已保存 ${provider.displayName} 授权会话"
+                        val extraHeaders: Map<String, String> = if (provider == WebProviderType.DEEPSEEK_WEB) {
+                            capturedDeepSeekFingerprint.value
+                        } else emptyMap()
+                        onSessionSaved(provider, accountName, cookies, token, emptyMap(), extraHeaders)
+                        val fpNote = if (extraHeaders.isNotEmpty()) "（含设备指纹）" else ""
+                        toast = "已保存 ${provider.displayName} 授权会话$fpNote"
                     }
                 } else if (cookies.isBlank()) {
                     toast = "未获取到 Cookie，请先登录 ${provider.displayName}"
@@ -2581,13 +2590,13 @@ fun BrowserScreen(
                                 if (byOrigin.isEmpty()) {
                                     toast = "Gemini 登录已显示，但没有取得按域 Cookie"
                                 } else {
-                                    onSessionSaved(provider, accountName, cookies, "", byOrigin)
+                                    onSessionSaved(provider, accountName, cookies, "", byOrigin, emptyMap())
                                     toast = "已按域保存并验证 Gemini 登录会话"
                                 }
                             }
                         }
                     } else {
-                        onSessionSaved(provider, accountName, cookies, "", emptyMap())
+                        onSessionSaved(provider, accountName, cookies, "", emptyMap(), emptyMap())
                         toast = "已保存并验证 ${provider.displayName} 登录会话"
                     }
                 }
@@ -2827,6 +2836,11 @@ fun BrowserScreen(
                                 request?.requestHeaders?.entries?.firstOrNull {
                                     it.key.equals("Authorization", ignoreCase = true)
                                 }?.value?.takeIf(String::isNotBlank)?.let { capturedAuthorization.set(it) }
+                                request?.requestHeaders?.entries?.firstOrNull {
+                                    it.key.equals("x-hif-leim", ignoreCase = true)
+                                }?.value?.takeIf(String::isNotBlank)?.let { fp ->
+                                    capturedDeepSeekFingerprint.value = mapOf("x-hif-leim" to fp)
+                                }
                             }
                             return super.shouldInterceptRequest(view, request)
                         }

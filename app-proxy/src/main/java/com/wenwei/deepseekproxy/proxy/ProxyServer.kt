@@ -532,6 +532,11 @@ object ProxyServer {
                 handleKimiChat(req, completionId, created, WebProviderType.KIMI_WEB)
                 return
             }
+            // DSROUTE: DeepSeek 直调路由（豆包同款 API 直调路线；smali 层已端到端验证，此处回流源码）
+            if (registeredModel.providerType == WebProviderType.DEEPSEEK_WEB) {
+                handleDeepSeekChat(req, completionId, created)
+                return
+            }
             if (registeredModel.providerType == WebProviderType.QWEN_WEB) {
                 handleQwenChat(registeredModel, req, completionId, created)
                 return
@@ -692,12 +697,20 @@ object ProxyServer {
         completionId: String,
         created: Int,
     ) {
-        val authorization = nextAuthorization(WebProviderType.DEEPSEEK_WEB, deepSeekRotationIdx)
-            .trim().let { if (it.startsWith("Bearer ", true)) it else "Bearer $it" }
-        if (authorization == "Bearer ") {
+        val dsSessionsAll = webSessions.filter { it.providerType == WebProviderType.DEEPSEEK_WEB }
+        // 识图 completion 强校验 x-hif-leim 指纹：优先只用带指纹的会话，避免轮询到旧无指纹会话被静默拒绝
+        val dsSessions = dsSessionsAll.filter { s ->
+            s.extraHeaders.keys.any { it.equals("x-hif-leim", ignoreCase = true) }
+        }.ifEmpty { dsSessionsAll }
+        android.util.Log.i("DSVision", "DS 会话池: ${dsSessions.size}/${dsSessionsAll.size} 带指纹 (${dsSessions.joinToString(",") { it.displayName + ":" + it.extraHeaders.size }})")
+        if (dsSessions.isEmpty()) {
             call.respond(HttpStatusCode.ServiceUnavailable, mapOf("error" to "请先在浏览器登录 DeepSeek、发送一条消息并保存会话"))
             return
         }
+        val dsSession = dsSessions[deepSeekRotationIdx.getAndUpdate { (it + 1) % dsSessions.size } % dsSessions.size]
+        val rawAuth = dsSession.authToken.ifBlank { dsSession.cookieHeader }
+        val authorization = rawAuth.trim().let { if (it.startsWith("Bearer ", true)) it else "Bearer $it" }
+        val variant = call.request.headers["X-DS-Variant"] ?: "base"
         val prompt = deepSeekPrompt(req.messages)
         if (prompt.isBlank()) {
             call.respond(HttpStatusCode.BadRequest, mapOf("error" to "empty prompt"))
@@ -707,6 +720,7 @@ object ProxyServer {
             deepSeekRequestMutex.withLock {
                 withContext(Dispatchers.IO) {
                     DeepSeekClient.token = authorization
+                    DeepSeekClient.extraHeaders = dsSession.extraHeaders
                     val sessionId = DeepSeekClient.createSession()
                     try {
                         // 提取图片附件并上传（识图）：带图消息的图片经 uploadImage 拿 file_id，传 completion 的 ref_file_ids
@@ -716,20 +730,21 @@ object ProxyServer {
                                 runCatching {
                                     val b64 = att.dataUrl.substringAfter("base64,", "")
                                     val bytes = android.util.Base64.decode(b64, android.util.Base64.NO_WRAP)
-                                    DeepSeekClient.uploadImage(bytes, att.name)
+                                    DeepSeekClient.uploadImage(bytes, att.name, variant)
                                 }.getOrNull()
                             }
+                        LogStore.i("DSRoute", "session=$sessionId refFiles=${refFileIds.size} variant=$variant")
                         val challenge = DeepSeekClient.createPowChallenge("/api/v0/chat/completion")
                         val answer = DeepSeekPow.solve(
                             challenge.challenge, challenge.salt, challenge.expireAt, challenge.difficulty
                         )
                         val pow = DeepSeekClient.buildPowHeader(challenge, answer, "/api/v0/chat/completion")
                         val modelType: String? = when {
-                            refFileIds.isNotEmpty() -> null  // 识图：网页端 model_type=null
+                            refFileIds.isNotEmpty() -> "vision"  // 识图：CDP 实测网页端显式传 "vision"，null 会被服务器静默 close
                             req.model.contains("reasoner", true) -> "expert"
                             else -> "default"
                         }
-                        DeepSeekClient.chatCompletion(sessionId, prompt, pow, modelType, refFileIds).use { response ->
+                        DeepSeekClient.chatCompletion(sessionId, prompt, pow, modelType, refFileIds, null, variant).use { response ->
                             DeepSeekClient.parseSse(response.body!!.source(), emit)
                         }
                     } finally {
@@ -776,6 +791,7 @@ object ProxyServer {
         completionId: String,
         created: Int,
     ) {
+        val variant = call.request.headers["X-DS-Variant"] ?: "base"
         val prompt = deepSeekPrompt(req.messages)
         if (prompt.isBlank()) {
             call.respond(HttpStatusCode.BadRequest, mapOf("error" to "empty prompt"))

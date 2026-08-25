@@ -22,7 +22,8 @@ import java.util.concurrent.TimeUnit
 object DeepSeekClient {
     private val client = OkHttpClient.Builder()
         .connectTimeout(20, TimeUnit.SECONDS)
-        .readTimeout(0, TimeUnit.SECONDS)
+        // 150s 无字节即判死流（正常生成持续出帧；识图呆滞时及时释放互斥锁）
+        .readTimeout(150, TimeUnit.SECONDS)
         .build()
 
     private const val BASE = "https://chat.deepseek.com"
@@ -31,17 +32,23 @@ object DeepSeekClient {
     /** Bearer token，由 ProxyServer 在每次请求前注入（来自 UI 设置的凭证）。 */
     var token: String = ""
 
+    /** 额外请求头（x-hif-leim 设备指纹等），来自保存会话时的捕获。 */
+    @Volatile
+    var extraHeaders: Map<String, String> = emptyMap()
+
     private fun newRequestBuilder(path: String): Request.Builder {
         return Request.Builder().url(BASE + path)
             .header("authorization", token)
             .header("user-agent", UA)
             .header("origin", BASE)
             .header("referer", BASE + "/")
-            .header("x-client-version", "2.3.0")
+            // 与网页端对齐：版本过旧会被风控降级（识图被静默丢弃）
+            .header("x-client-version", "2.4.0")
             .header("x-client-platform", "web")
             .header("x-client-locale", "zh_CN")
             .header("x-client-bundle-id", "com.deepseek.chat")
             .header("x-client-timezone-offset", "28800")
+            .apply { extraHeaders.forEach { (k, v) -> header(k, v) } }
             .header("accept", "*/*")
     }
 
@@ -122,7 +129,7 @@ object DeepSeekClient {
      * 流程：create_pow_challenge(/api/v0/file/upload_file) → DeepSeekPow.solve → 带 x-ds-pow-response 上传
      * → fetch_files 轮询确认 status=SUCCESS（网页端同款，PENDING 时 completion 不识别）。
      */
-    suspend fun uploadImage(bytes: ByteArray, fileName: String = "image.png"): String {
+    suspend fun uploadImage(bytes: ByteArray, fileName: String = "image.png", variant: String = "base"): String {
         // 1. POW challenge（与 completion 同款）
         val challenge = createPowChallenge("/api/v0/file/upload_file")
         val answer = DeepSeekPow.solve(
@@ -140,14 +147,14 @@ object DeepSeekClient {
         val body = MultipartBody.Builder().setType(MultipartBody.FORM)
             .addFormDataPart("file", fileName, bytes.toRequestBody(mime.toMediaType()))
             .build()
-        val req = newRequestBuilder("/api/v0/file/upload_file")
+        val rb = newRequestBuilder("/api/v0/file/upload_file")
             .post(body)
             .header("x-ds-pow-response", powHeader)
             .header("x-file-size", bytes.size.toString())
-            .header("x-model-type", "vision")
-            .header("x-thinking-enabled", "0")
-            .header("accept", "*/*")
-            .build()
+        if (variant != "novisionhdr") {
+            rb.header("x-model-type", "vision").header("x-thinking-enabled", "0")
+        }
+        val req = rb.header("accept", "*/*").build()
         val fileId = client.newCall(req).execute().use { resp ->
             val text = resp.body?.string() ?: ""
             if (!resp.isSuccessful) {
@@ -207,24 +214,40 @@ object DeepSeekClient {
         sessionId: String, prompt: String, powHeader: String, modelType: String? = "default",
         refFileIds: List<String> = emptyList(),
         parentMessageId: Int? = null,
+        variant: String = "base",
     ): Response {
+        // DSVAR: variant 调试开关（X-DS-Variant 头控制），排查识图 completion 呆滞
         val body = JSONObject().apply {
             put("chat_session_id", sessionId)
-            put("parent_message_id", parentMessageId ?: JSONObject.NULL)
-            put("model_type", modelType ?: JSONObject.NULL)
+            if (variant != "noparent") put("parent_message_id", parentMessageId ?: JSONObject.NULL)
+            when (variant) {
+                "mtdefault" -> put("model_type", "default")   // 假设A: 识图也用 default
+                "mtvision" -> put("model_type", "vision")
+                else -> put("model_type", modelType ?: JSONObject.NULL)
+            }
             put("prompt", prompt)
             put("ref_file_ids", JSONArray().apply { refFileIds.forEach { put(it) } })
-            put("thinking_enabled", false)
+            // 假设D: 识图开思考（think 变体）；nothink 显式关；其余默认关
+            if (variant == "think" && refFileIds.isNotEmpty()) {
+                put("thinking_enabled", true)
+            } else if (variant != "nothink") {
+                put("thinking_enabled", false)
+            }
             put("search_enabled", false)
             put("action", JSONObject.NULL)
             put("preempt", false)
         }
         android.util.Log.i("DSVision", "completion body: " + body.toString())
-        val req = newRequestBuilder("/api/v0/chat/completion")
+        val rb = newRequestBuilder("/api/v0/chat/completion")
             .post(body.toString().toRequestBody("application/json".toMediaType()))
             .header("x-ds-pow-response", powHeader)
-            .header("accept", "text/event-stream")
-            .build()
+        if (variant == "raw") {
+            rb.header("accept", "application/json, text/plain, */*")
+        } else {
+            rb.header("accept", "text/event-stream")
+        }
+        android.util.Log.i("DSVision", "completion variant=$variant body=" + body.toString())
+        val req = rb.build()
         val resp = client.newCall(req).execute()
         if (!resp.isSuccessful) {
             val err = resp.body?.string() ?: ""
@@ -257,6 +280,8 @@ object DeepSeekClient {
     suspend fun parseSse(src: okio.BufferedSource, onDelta: suspend (String) -> Unit) {
         var prefix = ""
         var prefixEmitted = false
+        var frameCount = 0
+        var lastLogAt = 0L
         var gotV = false
         val rawForBlob = mutableListOf<String>()
         suspend fun emitPrefix() {
@@ -268,6 +293,12 @@ object DeepSeekClient {
 
         while (true) {
             val line = src.readUtf8Line() ?: break
+            frameCount++
+            val nowMs = System.currentTimeMillis()
+            if (frameCount <= 8 || nowMs - lastLogAt > 2000) {
+                android.util.Log.d("DSVision", "SSE frame#$frameCount: " + line.take(120))
+                lastLogAt = nowMs
+            }
             val t = line.trimStart()
             if (!t.startsWith("data:")) continue
             val data = t.substring(5).trim()
@@ -280,12 +311,19 @@ object DeepSeekClient {
                 val obj = JSONObject(data)
                 val vVal = obj.opt("v")
                 when {
-                    // 带 p 的补丁/遥测优先：fragments content 的 APPEND 并入前缀，其余（含 FINISHED）跳过
+                    // 带 p 的补丁帧：2.4.0 协议下正文就是 {"p":"response/fragments/-1/content","o":"APPEND","v":"..."}
+                    // p 指向 fragments content 的 APPEND 是真正正文增量（实测 "PONG" 只发后缀 "ONG"，
+                    // 说明首字符在骨架 fragments 里，前缀逻辑已兜住）→ 直接回调；
+                    // 其余 p 帧（BATCH 遥测、status SET、FINISHED 等）跳过。
                     obj.has("p") -> {
                         val p = obj.optString("p", "")
                         if (p.endsWith("/content") && obj.optString("o", "") == "APPEND") {
                             val pv = obj.optString("v", "")
-                            if (pv.isNotEmpty()) prefix += pv
+                            if (pv.isNotEmpty()) {
+                                gotV = true
+                                emitPrefix()
+                                onDelta(pv)
+                            }
                         }
                     }
                     // 顶层 {"response":{...}}（无 v）：取 fragments 前缀
@@ -317,7 +355,12 @@ object DeepSeekClient {
         // 未遇到任何 v 流：尝试 blob（整块）格式回退
         if (!gotV) {
             val blob = extractBlobText(rawForBlob.joinToString("\n"))
-            if (blob.isNotEmpty()) onDelta(blob)
+            if (blob.isNotEmpty()) {
+                android.util.Log.i("DSVision", "blob 回退命中，共 $frameCount 帧")
+                onDelta(blob)
+            } else {
+                android.util.Log.w("DSVision", "SSE 结束无内容：共 $frameCount 帧，gotV=false（服务器未发正文）")
+            }
         }
     }
 
