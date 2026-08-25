@@ -6,7 +6,7 @@ import org.junit.Test
 class ProviderCatalogTest {
 
     @Test
-    fun webRelayDiscoveryExcludesOrdinaryCompatibleApiModels() {
+    fun webRelayDiscoveryIncludesEnabledCompatibleApiModels() {
         val web = ProviderModel(
             publicModelId = "custom-web",
             displayName = "Custom Web",
@@ -20,7 +20,7 @@ class ProviderCatalogTest {
             capabilities = setOf(ProviderCapability.CHAT),
         )
 
-        assertEquals(listOf(web), discoverableWebRelayModels(listOf(web, api)))
+        assertEquals(listOf(web, api), discoverableWebRelayModels(listOf(web, api)))
     }
 
     @Test

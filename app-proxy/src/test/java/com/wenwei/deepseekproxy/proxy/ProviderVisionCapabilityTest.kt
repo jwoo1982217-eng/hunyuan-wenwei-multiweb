@@ -18,6 +18,7 @@ class ProviderVisionCapabilityTest {
         assertTrue(api("nvidia/nemotron-nano-12b-v2-vl").supportsImageInput)
         assertTrue(api("gemini-2.0-flash").supportsImageInput)
         assertFalse(api("deepseek-v4-flash").supportsImageInput)
-        assertFalse(ProviderCatalog.find("hy3-preview")!!.supportsImageInput)
+        // 混元3 (CNB/HY3) 是 VL 模型，supportsImageInput 对 CNB 返回 true（见 ProviderCatalog）
+        assertTrue(ProviderCatalog.find("hy3-preview")!!.supportsImageInput)
     }
 }

@@ -22,7 +22,9 @@ data class SavedWebSession(
     val authToken: String = "",
     val cookieHeadersByOrigin: Map<String, String> = emptyMap(),
     val modelIds: List<String> = emptyList(),
-    val capturedAt: Long
+    val capturedAt: Long,
+    /** 额外请求头（如 DeepSeek x-hif-leim 设备指纹），保存会话时从网页 localStorage 捕获。 */
+    val extraHeaders: Map<String, String> = emptyMap()
 )
 
 /** Provider-scoped browser session snapshots. Cookie values are never written to logs. */
@@ -48,6 +50,7 @@ class WebSessionStore(context: Context) {
         cookieHeader: String,
         authToken: String = "",
         cookieHeadersByOrigin: Map<String, String> = emptyMap(),
+        extraHeaders: Map<String, String> = emptyMap(),
     ): SavedWebSession {
         require(providerType.supportsWebLogin) { "Provider does not support Web login" }
         require(cookieHeader.isNotBlank() || authToken.isNotBlank()) { "Cookie and authorization are empty" }
@@ -59,6 +62,7 @@ class WebSessionStore(context: Context) {
             cookieHeader = cookieHeader,
             authToken = authToken,
             cookieHeadersByOrigin = cookieHeadersByOrigin.filterValues(String::isNotBlank),
+            extraHeaders = extraHeaders.filterValues(String::isNotBlank),
             capturedAt = System.currentTimeMillis()
         )
         sessions += session
@@ -88,6 +92,9 @@ class WebSessionStore(context: Context) {
                 })
                 put("modelIds", JSONArray(session.modelIds))
                 put("capturedAt", session.capturedAt)
+                put("extraHeaders", JSONObject().apply {
+                    session.extraHeaders.forEach { (k, v) -> put(k, v) }
+                })
             })
         }
         prefs.edit().putString(KEY, array.toString()).apply()
@@ -122,7 +129,10 @@ class WebSessionStore(context: Context) {
                         modelIds = obj.optJSONArray("modelIds")?.let { models ->
                             (0 until models.length()).mapNotNull { models.optString(it).takeIf(String::isNotBlank) }
                         }.orEmpty(),
-                        capturedAt = obj.optLong("capturedAt")
+                        capturedAt = obj.optLong("capturedAt"),
+                        extraHeaders = obj.optJSONObject("extraHeaders")?.let { hs ->
+                            hs.keys().asSequence().associateWith { k -> hs.optString(k) }.filterValues(String::isNotBlank)
+                        }.orEmpty()
                     )
                 }
             }.getOrDefault(emptyList())

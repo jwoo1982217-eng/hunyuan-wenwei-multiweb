@@ -390,6 +390,7 @@ class ProxyViewModel(app: Application) : AndroidViewModel(app) {
         cookieHeader: String,
         authToken: String = "",
         cookieHeadersByOrigin: Map<String, String> = emptyMap(),
+        extraHeaders: Map<String, String> = emptyMap(),
     ) {
         val saved = webSessionStore.save(
             provider,
@@ -397,6 +398,7 @@ class ProxyViewModel(app: Application) : AndroidViewModel(app) {
             cookieHeader,
             authToken,
             cookieHeadersByOrigin,
+            extraHeaders,
         )
         refreshWebSessions()
         if (provider == WebProviderType.DOUBAO_WEB) updateSelectedCookie(saved.cookieHeader)
