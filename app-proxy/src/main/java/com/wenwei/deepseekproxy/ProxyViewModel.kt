@@ -112,9 +112,10 @@ class ProxyViewModel(app: Application) : AndroidViewModel(app) {
     val localBearerToken = MutableStateFlow(localGatewayTokenStore.getOrCreate())
 
     init {
-        // Legacy builds persisted a running flag and restored the foreground service.
-        // Local gateway startup is intentionally user-only now.
-        prefs.edit().remove("running").apply()
+        // 上次开过网关则随 App 启动自动恢复（旧行为）；用户手动停过则不自启
+        if (prefs.getBoolean("running", false)) {
+            viewModelScope.launch(Dispatchers.IO) { runCatching { ensureLocalGatewayRunning() } }
+        }
         LocalGatewayServiceLifecycle.reconcileWithRuntime()
         ProxyServer.setWebSessions(webSessions.value)
         CustomWebProviderRegistry.set(customWebProviders.value)
@@ -579,6 +580,7 @@ class ProxyViewModel(app: Application) : AndroidViewModel(app) {
         ProxyServer.defaultImageSize = imageSize.value
         ProxyServer.setBearerToken(localBearerToken.value)
         LocalGatewayServiceLifecycle.startRequested()
+        prefs.edit().putBoolean("running", true).apply()
         try {
             ContextCompat.startForegroundService(app, intent)
             LogStore.i("Proxy", "▶ 已请求启动本机网关: http://127.0.0.1:${port.value}/v1/chat/completions")
@@ -629,6 +631,7 @@ class ProxyViewModel(app: Application) : AndroidViewModel(app) {
     fun stopServer() {
         val app = getApplication<Application>()
         val stopDispatched = app.stopService(Intent(app, ProxyService::class.java))
+        prefs.edit().putBoolean("running", false).apply()
         if (!stopDispatched) {
             ProxyServer.stop()
             LocalGatewayServiceLifecycle.stopped()
@@ -915,7 +918,14 @@ class ProxyViewModel(app: Application) : AndroidViewModel(app) {
                     }
                     val data = JSONObject(respBody).optJSONArray("data") ?: JSONArray()
                     val urls = (0 until data.length()).mapNotNull { i ->
-                        data.optJSONObject(i)?.optString("url", "")
+                        val item = data.optJSONObject(i) ?: return@mapNotNull null
+                        val url = item.optString("url", "")
+                        if (url.isNotBlank()) return@mapNotNull url
+                        // 兜底：上游只返回 b64_json 时转成 data URL（如阶跃 edits）
+                        val b64 = item.optString("b64_json", "")
+                        if (b64.isNotBlank()) {
+                            if (b64.startsWith("data:")) b64 else "data:image/png;base64,$b64"
+                        } else null
                     }.filter { it.isNotBlank() }
                     if (urls.isEmpty()) {
                         chatMessages.value = chatMessages.value + ChatMessageItem("assistant", "⚠️ 生图未返回图片")
@@ -930,8 +940,17 @@ class ProxyViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** 视频生成：调用本地 /v1/videos/generations（自定义 Web WebView 驱动）。 */
-    fun generateVideo(prompt: String, attachmentUris: List<Uri> = emptyList()) {
+    /** 视频生成：调用本地 /v1/videos/generations（自定义 Web WebView 驱动 或 接口直调）。 */
+    fun generateVideo(
+        prompt: String,
+        attachmentUris: List<Uri> = emptyList(),
+        duration: String = "Auto",
+        resolution: String = "Auto",
+        ratio: String = "Auto",
+        fps: String = "Auto",
+        audio: String = "关",
+        watermark: String = "开"
+    ) {
         if (prompt.isBlank() && attachmentUris.isEmpty()) return
         chatInput.value = ""
         val images = attachmentUris.mapNotNull(::readAttachment).filter { it.mime.startsWith("image/") }
@@ -940,13 +959,23 @@ class ProxyViewModel(app: Application) : AndroidViewModel(app) {
             "【生成视频】$prompt",
             images = images.map { it.dataUrl }
         )
-        LogStore.i("App", "视频请求: ${prompt.take(80)} (model=${videoModel.value}, 参考图=${images.size})")
+        LogStore.i("App", "视频请求: ${prompt.take(80)} (model=${videoModel.value}, 参考图=${images.size}, 比例=$ratio, 时长=$duration, 清晰度=$resolution)")
 
         val endpoint = "http://127.0.0.1:${port.value}/v1/videos/generations"
         val body = JSONObject().apply {
             put("model", videoModel.value)
             put("prompt", prompt)
             put("n", 1)
+            // 仅透传 UI 原始字符串，**不**预设厂商无关字段（如 watermark_enabled / with_audio 等），
+            // 厂商分支（OpenAiCompatibleClient.executeVideo）按 baseUrl/model 决定是否使用及如何映射。
+            // 误传给 Agnes 会导致 400: "watermark_enabled is not an allowed request field"。
+            if (duration != "Auto" && duration.isNotBlank()) put("duration_str", duration)
+            if (resolution != "Auto" && resolution.isNotBlank()) put("resolution_str", resolution)
+            if (ratio != "Auto" && ratio.isNotBlank()) put("ratio_str", ratio)
+            if (fps != "Auto" && fps.isNotBlank()) put("fps_str", fps)
+            put("audio_pref", audio)
+            put("watermark_pref", watermark)
+
             if (images.isNotEmpty()) {
                 val arr = JSONArray()
                 for (img in images) {
@@ -998,7 +1027,14 @@ class ProxyViewModel(app: Application) : AndroidViewModel(app) {
                     }
                     val data = JSONObject(respBody).optJSONArray("data") ?: JSONArray()
                     val urls = (0 until data.length()).mapNotNull { i ->
-                        data.optJSONObject(i)?.optString("url", "")
+                        val item = data.optJSONObject(i) ?: return@mapNotNull null
+                        val url = item.optString("url", "")
+                        if (url.isNotBlank()) return@mapNotNull url
+                        // 兜底：上游只返回 b64_json 时转成 data URL
+                        val b64 = item.optString("b64_json", "")
+                        if (b64.isNotBlank()) {
+                            if (b64.startsWith("data:")) b64 else "data:video/mp4;base64,$b64"
+                        } else null
                     }.filter { it.isNotBlank() }
                     if (urls.isEmpty()) {
                         chatMessages.value = chatMessages.value + ChatMessageItem("assistant", "⚠️ 视频生成未返回结果")

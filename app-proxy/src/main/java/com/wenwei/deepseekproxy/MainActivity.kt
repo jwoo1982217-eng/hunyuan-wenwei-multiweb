@@ -1,4 +1,4 @@
-package com.wenwei.deepseekproxy
+﻿package com.wenwei.deepseekproxy
 
 import android.Manifest
 import android.content.Context
@@ -433,8 +433,17 @@ fun App(vm: ProxyViewModel) {
                                 vm.generateImage(payload, attachments)
                                 input = ""
                             },
-                            onGenerateVideo = { payload, attachments ->
-                                vm.generateVideo(payload, attachments)
+                            onGenerateVideo = { payload, attachments, dur, res, rat, fps, aud, wmk ->
+                                vm.generateVideo(
+                                    prompt = payload,
+                                    attachmentUris = attachments,
+                                    duration = dur,
+                                    resolution = res,
+                                    ratio = rat,
+                                    fps = fps,
+                                    audio = aud,
+                                    watermark = wmk
+                                )
                                 input = ""
                             },
                             modifier = Modifier.fillMaxSize().padding(horizontal = 10.dp, vertical = 6.dp)
@@ -549,7 +558,7 @@ private fun ApiProviderEditorDialog(
         val video = initial?.videoModels.orEmpty()
         fun isVideoModel(id: String): Boolean =
             id.contains("video", ignoreCase = true) ||
-                Regex("sora|kling|wanx|veo|t2v|v2v|text[-_]?to[-_]?video|animate|cogvideo", RegexOption.IGNORE_CASE).containsMatchIn(id)
+                Regex("(^|[-_./])(sora|kling|wanx|veo|t2v|v2v|text[-_]?to[-_]?video|animate|cogvideo)([-_./]|$)", RegexOption.IGNORE_CASE).containsMatchIn(id)
         chat.filterNot(::isVideoModel) to (video + chat.filter(::isVideoModel)).distinct()
     }
     var chatModels by remember(initial?.id) { mutableStateOf(initialChat.first.joinToString("\n")) }
@@ -655,7 +664,7 @@ fun ProxyScreen(
     onSend: (String, List<Uri>) -> Unit,
     onRoundtable: (String, List<String>, List<Uri>) -> Unit,
     onGenerate: (String, List<Uri>) -> Unit,
-    onGenerateVideo: (String, List<Uri>) -> Unit = onGenerate,
+    onGenerateVideo: (String, List<Uri>, String, String, String, String, String, String) -> Unit = { payload, uris, _, _, _, _, _, _ -> onGenerate(payload, uris) },
     modifier: Modifier = Modifier
 ) {
     android.util.Log.i("ProxyScreen", "=== ProxyScreen recomposing, model=$model, input=$input ===")
@@ -666,6 +675,13 @@ fun ProxyScreen(
     val apiProviderConfigs by vm.apiProviders.collectAsState()
     val imageModelFlow by vm.imageModel.collectAsState()
     val videoModelFlow by vm.videoModel.collectAsState()
+    // 视频参数（设置级联菜单）：Auto=不传由上游默认；自定义=手填字符串；音效/无水印=开关
+    var videoDuration by remember { mutableStateOf("Auto") }
+    var videoResolution by remember { mutableStateOf("Auto") }
+    var videoRatio by remember { mutableStateOf("Auto") }
+    var videoFps by remember { mutableStateOf("Auto") }
+    var videoAudio by remember { mutableStateOf("关") }
+    var videoWatermark by remember { mutableStateOf("开") }
     // 过滤「冗余纯别名」：buildPlainModelAliases 生成的 id 就是 upstream，
     // 若存在带接口前缀版本（X--upstream），纯别名只是兜底，UI 里隐藏避免成对。
     fun <T> dedupeProviderModels(models: List<T>): List<T> {
@@ -697,7 +713,7 @@ fun ProxyScreen(
     fun providerLabel(items: List<com.wenwei.deepseekproxy.proxy.ProviderModel>): String {
         val item = items.first()
         return when (item.providerType) {
-            WebProviderType.CUSTOM_WEB -> item.displayName.removeSuffix(" 生图")
+            WebProviderType.CUSTOM_WEB -> item.displayName.removeSuffix(" 生图").removeSuffix("视频")
             WebProviderType.OPENAI_COMPATIBLE -> when (item.accountId) {
                 "auto" -> "API 自动最快"
                 else -> apiProviderConfigs.firstOrNull { it.id == item.accountId }?.name ?: "API 接口"
@@ -991,8 +1007,8 @@ fun ProxyScreen(
             }
         }
 
-        Spacer(Modifier.height(6.dp))
         if (!imageMode && !videoMode) {
+        Spacer(Modifier.height(6.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
                 ExposedDropdownMenuBox(
                     expanded = providerExpanded,
@@ -1082,78 +1098,78 @@ fun ProxyScreen(
             var imageProviderExpanded by remember { mutableStateOf(false) }
             var imageModelExpanded by remember { mutableStateOf(false) }
             var sizeExpanded by remember { mutableStateOf(false) }
-            ExposedDropdownMenuBox(
-                expanded = imageProviderExpanded,
-                onExpandedChange = { imageProviderExpanded = it },
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Surface(
-                    modifier = Modifier.menuAnchor().fillMaxWidth().heightIn(min = 44.dp),
-                    shape = RoundedCornerShape(12.dp),
-                    color = MaterialTheme.colorScheme.surface,
-                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                // 生图供应商框
+                ExposedDropdownMenuBox(
+                    expanded = imageProviderExpanded,
+                    onExpandedChange = { imageProviderExpanded = it },
+                    modifier = Modifier.weight(1.2f)
                 ) {
-                    Row(
-                        Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically
+                    Surface(
+                        modifier = Modifier.menuAnchor().fillMaxWidth().heightIn(min = 44.dp),
+                        shape = RoundedCornerShape(12.dp),
+                        color = MaterialTheme.colorScheme.surface,
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
                     ) {
-                        Text("生图供应商 · ", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        Text(
-                            selectedImageProviderLabel,
-                            style = MaterialTheme.typography.bodyMedium,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.weight(1f)
-                        )
-                        Text(if (imageProviderExpanded) "▴" else "▾", modifier = Modifier.padding(start = 6.dp))
-                    }
-                }
-                ExposedDropdownMenu(imageProviderExpanded, { imageProviderExpanded = false }) {
-                    visibleImageProviderOptions.forEach { (optionKey, label) ->
-                        Box(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .combinedClickable(
-                                    onClick = {
-                                        val foundModel = imageModels.firstOrNull { providerKey(it) == optionKey }
-                                        android.util.Log.i("ImageSwitch", "切换生图供应商: optionKey=$optionKey, label=$label")
-                                        android.util.Log.i("ImageSwitch", "  查找结果: foundModel=${foundModel?.publicModelId}")
-                                        android.util.Log.i("ImageSwitch", "  当前 imageModel.value=${imageModelFlow}")
-                                        android.util.Log.i("ImageSwitch", "  匹配条件: 查找 providerKey(it)==$optionKey 的模型")
-                                        imageModels.filter { providerKey(it) == optionKey }.forEach {
-                                            android.util.Log.i("ImageSwitch", "    匹配到: ${it.publicModelId}")
-                                        }
-                                        foundModel?.publicModelId?.let {
-                                            vm.setImageModel(it)
-                                            onBrowserModelRequested(it)
-                                            android.util.Log.i("ImageSwitch", "  已设置 imageModel=$it")
-                                        } ?: android.util.Log.e("ImageSwitch", "  未找到匹配模型，imageModel 保持不变")
-                                        imageProviderExpanded = false
-                                    },
-                                    onLongClick = {
-                                    imageProviderExpanded = false
-                                    pendingHideRelayProvider = Triple(optionKey, label, "image")
-                                }
-                                )
-                                .padding(horizontal = 16.dp, vertical = 12.dp)
+                        Row(
+                            Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Text(label)
+                            if (selectedImageProviderLabel.isEmpty()) {
+                                Text("生图供应商", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            } else {
+                                Text(
+                                    selectedImageProviderLabel,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.weight(1f)
+                                )
+                            }
+                            Text(if (imageProviderExpanded) "▴" else "▾", modifier = Modifier.padding(start = 6.dp))
                         }
                     }
-                    if (hiddenWebProviders.isNotEmpty()) {
-                        DropdownMenuItem(
-                            text = { Text("已隐藏的供应商（${hiddenWebProviders.size}）") },
-                            onClick = { imageProviderExpanded = false; hiddenMenu = true }
-                        )
+                    ExposedDropdownMenu(imageProviderExpanded, { imageProviderExpanded = false }) {
+                        visibleImageProviderOptions.forEach { (optionKey, label) ->
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .combinedClickable(
+                                        onClick = {
+                                            val foundModel = imageModels.firstOrNull { providerKey(it) == optionKey }
+                                            imageModels.filter { providerKey(it) == optionKey }.forEach {
+                                                android.util.Log.i("ImageSwitch", "    匹配到: ${it.publicModelId}")
+                                            }
+                                            foundModel?.publicModelId?.let {
+                                                vm.setImageModel(it)
+                                                onBrowserModelRequested(it)
+                                            } ?: android.util.Log.e("ImageSwitch", "  未找到匹配模型，imageModel 保持不变")
+                                            imageProviderExpanded = false
+                                        },
+                                        onLongClick = {
+                                            imageProviderExpanded = false
+                                            pendingHideRelayProvider = Triple(optionKey, label, "image")
+                                        }
+                                    )
+                                    .padding(horizontal = 16.dp, vertical = 12.dp)
+                            ) {
+                                Text(label)
+                            }
+                        }
+                        if (hiddenWebProviders.isNotEmpty()) {
+                            DropdownMenuItem(
+                                text = { Text("已隐藏的供应商（${hiddenWebProviders.size}）") },
+                                onClick = { imageProviderExpanded = false; hiddenMenu = true }
+                            )
+                        }
                     }
                 }
-            }
-            Spacer(Modifier.height(6.dp))
-            Row(verticalAlignment = Alignment.CenterVertically) {
+                Spacer(Modifier.width(8.dp))
+                // 生图模型框
                 ExposedDropdownMenuBox(
                     expanded = imageModelExpanded,
                     onExpandedChange = { imageModelExpanded = it },
-                    modifier = Modifier.weight(1.35f)
+                    modifier = Modifier.weight(1.5f)
                 ) {
                     Surface(
                         modifier = Modifier.menuAnchor().fillMaxWidth().heightIn(min = 44.dp),
@@ -1165,14 +1181,18 @@ fun ProxyScreen(
                             Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 8.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Text("模型 · ", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            Text(
-                                imageModels.firstOrNull { it.publicModelId == imageModelFlow }?.displayName ?: imageModelFlow,
-                                style = MaterialTheme.typography.bodyMedium,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier.weight(1f)
-                            )
+                            val currentImageModel = imageModels.firstOrNull { it.publicModelId == imageModelFlow }?.displayName ?: imageModelFlow
+                            if (currentImageModel.isEmpty() || imageModels.firstOrNull { it.publicModelId == imageModelFlow } == null) {
+                                Text("模型", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            } else {
+                                Text(
+                                    currentImageModel,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.weight(1f)
+                                )
+                            }
                             Text(if (imageModelExpanded) "▴" else "▾", modifier = Modifier.padding(start = 4.dp))
                         }
                     }
@@ -1188,10 +1208,11 @@ fun ProxyScreen(
                     }
                 }
                 Spacer(Modifier.width(8.dp))
+                // 设置框
                 ExposedDropdownMenuBox(
                     expanded = sizeExpanded,
                     onExpandedChange = { sizeExpanded = it },
-                    modifier = Modifier.weight(0.85f)
+                    modifier = Modifier.weight(1f)
                 ) {
                     Surface(
                         modifier = Modifier.menuAnchor().fillMaxWidth().heightIn(min = 44.dp),
@@ -1233,7 +1254,7 @@ fun ProxyScreen(
                 }
                 .distinctBy { it.publicModelId.lowercase() }
             // 视频 tab 复用生图模型源，显示时把「生图」替换为「视频」
-            fun videoLabel(s: String): String = s.replace("生图", "视频")
+            fun videoLabel(s: String): String = s.replace("生图", "").replace("视频", "")
             val videoProviderOptions = videoModels.groupBy(::providerKey).map { (key, items) ->
                 // 供应商名去尾部「视频」（如「美团 视频」→「美团」），模型名不受影响
                 key to videoLabel(providerLabel(items)).replace(Regex("\\s*视频$"), "")
@@ -1246,69 +1267,78 @@ fun ProxyScreen(
             val selectedProviderVideoModels = videoModels.filter { providerKey(it) == selectedVideoProviderKey }
             var videoProviderExpanded by remember { mutableStateOf(false) }
             var videoModelExpanded by remember { mutableStateOf(false) }
-            ExposedDropdownMenuBox(
-                expanded = videoProviderExpanded,
-                onExpandedChange = { videoProviderExpanded = it },
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Surface(
-                    modifier = Modifier.menuAnchor().fillMaxWidth().heightIn(min = 44.dp),
-                    shape = RoundedCornerShape(12.dp),
-                    color = MaterialTheme.colorScheme.surface,
-                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
+            var videoSettingsExpanded by remember { mutableStateOf(false) }
+            var videoSettingsCat by remember { mutableStateOf<String?>(null) }
+            var customParamDialog by remember { mutableStateOf<String?>(null) }
+            var customParamText by remember { mutableStateOf("") }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                // 视频供应商框
+                ExposedDropdownMenuBox(
+                    expanded = videoProviderExpanded,
+                    onExpandedChange = { videoProviderExpanded = it },
+                    modifier = Modifier.weight(1.2f)
                 ) {
-                    Row(
-                        Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically
+                    Surface(
+                        modifier = Modifier.menuAnchor().fillMaxWidth().heightIn(min = 44.dp),
+                        shape = RoundedCornerShape(12.dp),
+                        color = MaterialTheme.colorScheme.surface,
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
                     ) {
-                        Text("视频供应商 · ", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        Text(
-                            selectedVideoProviderLabel,
-                            style = MaterialTheme.typography.bodyMedium,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.weight(1f)
-                        )
-                        Text(if (videoProviderExpanded) "▴" else "▾", modifier = Modifier.padding(start = 6.dp))
-                    }
-                }
-                ExposedDropdownMenu(videoProviderExpanded, { videoProviderExpanded = false }) {
-                    visibleVideoProviderOptions.forEach { (optionKey, label) ->
-                        Box(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .combinedClickable(
-                                    onClick = {
-                                        videoModels.firstOrNull { providerKey(it) == optionKey }?.publicModelId?.let {
-                                            vm.setVideoModel(it)
-                                            onBrowserModelRequested(it)
-                                        }
-                                        videoProviderExpanded = false
-                                    },
-                                    onLongClick = {
-                                        videoProviderExpanded = false
-                                        pendingHideRelayProvider = Triple(optionKey, label, "video")
-                                    }
-                                )
-                                .padding(horizontal = 16.dp, vertical = 12.dp)
+                        Row(
+                            Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Text(label)
+                            if (selectedVideoProviderLabel.isEmpty()) {
+                                Text("视频供应商", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            } else {
+                                Text(
+                                    selectedVideoProviderLabel,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.weight(1f)
+                                )
+                            }
+                            Text(if (videoProviderExpanded) "▴" else "▾", modifier = Modifier.padding(start = 6.dp))
                         }
                     }
-                    if (hiddenWebProviders.isNotEmpty()) {
-                        DropdownMenuItem(
-                            text = { Text("已隐藏的供应商（${hiddenWebProviders.size}）") },
-                            onClick = { videoProviderExpanded = false; hiddenMenu = true }
-                        )
+                    ExposedDropdownMenu(videoProviderExpanded, { videoProviderExpanded = false }) {
+                        visibleVideoProviderOptions.forEach { (optionKey, label) ->
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .combinedClickable(
+                                        onClick = {
+                                            videoModels.firstOrNull { providerKey(it) == optionKey }?.publicModelId?.let {
+                                                vm.setVideoModel(it)
+                                                onBrowserModelRequested(it)
+                                            }
+                                            videoProviderExpanded = false
+                                        },
+                                        onLongClick = {
+                                            videoProviderExpanded = false
+                                            pendingHideRelayProvider = Triple(optionKey, label, "video")
+                                        }
+                                    )
+                                    .padding(horizontal = 16.dp, vertical = 12.dp)
+                            ) {
+                                Text(label)
+                            }
+                        }
+                        if (hiddenWebProviders.isNotEmpty()) {
+                            DropdownMenuItem(
+                                text = { Text("已隐藏的供应商（${hiddenWebProviders.size}）") },
+                                onClick = { videoProviderExpanded = false; hiddenMenu = true }
+                            )
+                        }
                     }
                 }
-            }
-            Spacer(Modifier.height(6.dp))
-            Row(verticalAlignment = Alignment.CenterVertically) {
+                Spacer(Modifier.width(8.dp))
+                // 视频模型框
                 ExposedDropdownMenuBox(
                     expanded = videoModelExpanded,
                     onExpandedChange = { videoModelExpanded = it },
-                    modifier = Modifier.weight(1f)
+                    modifier = Modifier.weight(1.5f)
                 ) {
                     Surface(
                         modifier = Modifier.menuAnchor().fillMaxWidth().heightIn(min = 44.dp),
@@ -1320,14 +1350,18 @@ fun ProxyScreen(
                             Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 8.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Text("视频模型 · ", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            Text(
-                                videoLabel(videoModels.firstOrNull { it.publicModelId == videoModelFlow }?.displayName ?: videoModelFlow),
-                                style = MaterialTheme.typography.bodyMedium,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier.weight(1f)
-                            )
+                            val currentVideoModel = videoLabel(videoModels.firstOrNull { it.publicModelId == videoModelFlow }?.displayName ?: videoModelFlow)
+                            if (currentVideoModel.isEmpty() || videoModels.firstOrNull { it.publicModelId == videoModelFlow } == null) {
+                                Text("模型", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            } else {
+                                Text(
+                                    currentVideoModel,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.weight(1f)
+                                )
+                            }
                             Text(if (videoModelExpanded) "▴" else "▾", modifier = Modifier.padding(start = 4.dp))
                         }
                     }
@@ -1342,6 +1376,142 @@ fun ProxyScreen(
                         ) }
                     }
                 }
+                Spacer(Modifier.width(8.dp))
+                // 设置框（静态）
+                ExposedDropdownMenuBox(
+                    expanded = videoSettingsExpanded,
+                    onExpandedChange = { videoSettingsExpanded = it },
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Surface(
+                        modifier = Modifier.menuAnchor().fillMaxWidth().heightIn(min = 44.dp),
+                        shape = RoundedCornerShape(12.dp),
+                        color = MaterialTheme.colorScheme.surface,
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
+                    ) {
+                        Row(
+                            Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                "设置",
+                                style = MaterialTheme.typography.bodyMedium,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f)
+                            )
+                            Text(if (videoSettingsExpanded) "▴" else "▾", modifier = Modifier.padding(start = 4.dp))
+                        }
+                    }
+                    ExposedDropdownMenu(videoSettingsExpanded, {
+                        videoSettingsExpanded = false
+                        videoSettingsCat = null
+                    }) {
+                        // 第一级：参数名列表（点→进入二级）
+                        if (videoSettingsCat == null) {
+                            listOf("时长", "清晰度", "比例", "帧数", "音效", "无水印").forEach { cat ->
+                                val current = when (cat) {
+                                    "时长" -> videoDuration; "清晰度" -> videoResolution; "比例" -> videoRatio
+                                    "帧数" -> videoFps; "音效" -> videoAudio; else -> videoWatermark
+                                }
+                                DropdownMenuItem(
+                                    text = { Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Text(cat, modifier = Modifier.weight(1f))
+                                        Text(current, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                        Text(" ▸", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    } },
+                                    onClick = { videoSettingsCat = cat }
+                                )
+                            }
+                        } else {
+                            // 第二级：该参数的选项
+                            val (options, current) = when (videoSettingsCat) {
+                                "时长" -> listOf("Auto", "5s", "10s", "自定义") to videoDuration
+                                "清晰度" -> listOf("Auto", "480p", "720p", "1080p", "自定义") to videoResolution
+                                "比例" -> listOf("Auto", "9:16", "3:4", "1:1", "自定义") to videoRatio
+                                "帧数" -> listOf("Auto", "30FPS", "60FPS", "自定义") to videoFps
+                                "音效" -> listOf("关", "开") to videoAudio
+                                else -> listOf("开", "关") to videoWatermark
+                            }
+                            DropdownMenuItem(
+                                text = { Text("◂ ${videoSettingsCat}", color = MaterialTheme.colorScheme.onSurfaceVariant) },
+                                onClick = { videoSettingsCat = null }
+                            )
+                            options.forEach { opt ->
+                                DropdownMenuItem(
+                                    text = { Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Text(opt, if (opt == current) Modifier else Modifier, color = if (opt == current) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface)
+                                        if (opt == current) Text(" ✓", color = MaterialTheme.colorScheme.primary)
+                                    } },
+                                    onClick = {
+                                        if (opt == "自定义") {
+                                            customParamText = ""
+                                            customParamDialog = videoSettingsCat
+                                            videoSettingsExpanded = false
+                                            videoSettingsCat = null
+                                        } else {
+                                            when (videoSettingsCat) {
+                                                "时长" -> videoDuration = opt
+                                                "清晰度" -> videoResolution = opt
+                                                "比例" -> videoRatio = opt
+                                                "帧数" -> videoFps = opt
+                                                "音效" -> videoAudio = opt
+                                                else -> videoWatermark = opt
+                                            }
+                                            videoSettingsCat = null
+                                            videoSettingsExpanded = false
+                                        }
+                                    }
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+            customParamDialog?.let { paramName ->
+                AlertDialog(
+                    onDismissRequest = { customParamDialog = null },
+                    title = { Text("自定义$paramName") },
+                    text = {
+                        Column {
+                            Text(
+                                when (paramName) {
+                                    "时长" -> "示例：5s、8s"
+                                    "清晰度" -> "示例：720p、1080p"
+                                    "比例" -> "示例：9:16、16:9"
+                                    "帧数" -> "示例：30FPS、24FPS"
+                                    else -> ""
+                                },
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Spacer(Modifier.height(8.dp))
+                            androidx.compose.material3.OutlinedTextField(
+                                value = customParamText,
+                                onValueChange = { customParamText = it },
+                                singleLine = true,
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                        }
+                    },
+                    confirmButton = {
+                        TextButton(onClick = {
+                            val v = customParamText.trim()
+                            if (v.isNotEmpty()) {
+                                when (paramName) {
+                                    "时长" -> videoDuration = v
+                                    "清晰度" -> videoResolution = v
+                                    "比例" -> videoRatio = v
+                                    "帧数" -> videoFps = v
+                                }
+                            }
+                            customParamDialog = null
+                        }) { Text("确定") }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = { customParamDialog = null }) { Text("取消") }
+                    }
+                )
             }
         }
         pendingHideRelayProvider?.let { (hideKey, hideLabel, hideMode) ->
@@ -1512,7 +1682,16 @@ fun ProxyScreen(
                     android.util.Log.i("SendButton", "准备调用回调: imageMode=$imageMode, videoMode=$videoMode, roundtableMode=$roundtableMode")
                     if (videoMode) {
                         android.util.Log.i("SendButton", "调用 onGenerateVideo")
-                        onGenerateVideo(payload, pendingAttachments)
+                        onGenerateVideo(
+                            payload,
+                            pendingAttachments,
+                            videoDuration,
+                            videoResolution,
+                            videoRatio,
+                            videoFps,
+                            videoAudio,
+                            videoWatermark
+                        )
                     } else if (imageMode) {
                         android.util.Log.i("SendButton", "调用 onGenerate")
                         onGenerate(payload, pendingAttachments)
@@ -1777,30 +1956,39 @@ fun UrlVideo(url: String, modifier: Modifier = Modifier) {
             .fillMaxWidth()
             .heightIn(min = 200.dp, max = 400.dp)
             .background(Color.Black)
-            .combinedClickable(
-                onClick = {
-                    if (exoPlayer.isPlaying) exoPlayer.pause() else exoPlayer.play()
-                },
-                onLongClick = {
-                    scope.launch {
-                        Toast.makeText(context, "正在保存视频…", Toast.LENGTH_SHORT).show()
-                        val bytes = localFile?.takeIf { it.exists() }?.readBytes()
-                            ?: fetchImageBytes(context, url)
-                        if (bytes != null) {
-                            val sha = MessageDigest.getInstance("SHA-256").digest(bytes)
-                                .joinToString("") { "%02x".format(it) }
-                            android.util.Log.i("VideoPlayer", "保存视频: bytes=${bytes.size} sha256=$sha source=${if (localFile != null) "local-cache" else "remote"}")
-                            val ok = saveVideoToGallery(context, bytes)
-                            Toast.makeText(context, if (ok) "视频已保存到相册" else "保存失败", Toast.LENGTH_SHORT).show()
-                        } else {
-                            Toast.makeText(context, "视频获取失败", Toast.LENGTH_SHORT).show()
+    ) {
+        // 经典 PlayerView：只留播放键+进度条（prev/next/快进/快退全部隐藏），
+        // 点击呼出/3 秒自动隐藏控制栏，长按保留"保存到相册"。
+        androidx.compose.ui.viewinterop.AndroidView(
+            factory = { ctx ->
+                androidx.media3.ui.PlayerView(ctx).apply {
+                    this.player = exoPlayer
+                    useController = true
+                    setShowNextButton(false)
+                    setShowPreviousButton(false)
+                    setShowFastForwardButton(false)
+                    setShowRewindButton(false)
+                    setControllerShowTimeoutMs(3000)
+                    setOnLongClickListener {
+                        scope.launch {
+                            Toast.makeText(ctx, "正在保存视频…", Toast.LENGTH_SHORT).show()
+                            val bytes = localFile?.takeIf { it.exists() }?.readBytes()
+                                ?: fetchImageBytes(context, url)
+                            if (bytes != null) {
+                                val sha = MessageDigest.getInstance("SHA-256").digest(bytes)
+                                    .joinToString("") { "%02x".format(it) }
+                                android.util.Log.i("VideoPlayer", "保存视频: bytes=${bytes.size} sha256=$sha source=${if (localFile != null) "local-cache" else "remote"}")
+                                val ok = saveVideoToGallery(context, bytes)
+                                Toast.makeText(ctx, if (ok) "视频已保存到相册" else "保存失败", Toast.LENGTH_SHORT).show()
+                            } else {
+                                Toast.makeText(ctx, "视频获取失败", Toast.LENGTH_SHORT).show()
+                            }
                         }
+                        true
                     }
                 }
-            )
-    ) {
-        androidx.media3.ui.compose.material3.Player(
-            player = exoPlayer,
+            },
+            update = { it.player = exoPlayer },
             modifier = Modifier.fillMaxSize(),
         )
     }
