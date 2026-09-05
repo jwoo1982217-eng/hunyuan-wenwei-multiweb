@@ -1,0 +1,268 @@
+# 混元 MultiWeb 项目会话移交 — 2026-09-04
+
+> ## ⭐ 2026-09-04 晚间更新：§6.1 智谱视频"生一半闪退"已修复
+>
+> - **根因**：不是 OOM，是历史手写 smali 在 `MainActivityKt.UrlVideo` 留下的 2 处字节码损伤：
+>   1. 2 处 `sget-object` 类引用写成 `Landroidx/compose/runtime/Composer$Companion;->Companion`（正确去掉 `$Companion`）→ `NoSuchFieldError`
+>   2. `ExternalSyntheticLambda401` 构造器/字段类型为 `ExoPlayer`，调用点按 `Player` 解析 → `NoSuchMethodError`
+> - **修复文件**（`D:\reasonix_archive\tools\base-agnes-decoded\smali_classes3\com\wenwei\deepseekproxy\`）：
+>   `MainActivityKt.smali`（行 118633/118648，备份 `.bak-fix1`）+ `MainActivityKt$$ExternalSyntheticLambda401.smali`（4 处 ExoPlayer→Player）
+> - **修复版 APK**：`C:\Users\Administrator\Documents\leidian14\Pictures\混元 MultiWeb-视频闪退修复版.apk`（已装模拟器实测：智谱 cogvideox-flash 生成→渲染→播放全程零崩溃，播放控件条意外完好可用）
+> - **备份**：`D:\Users\Administrator\Desktop\备份\混元MultiWeb-视频闪退修复版-20260904.apk`
+> - **详细报告**：`D:\hunyuan-multiweb\修复报告-视频闪退-2026-09-04.md`
+> - **重要教训**：手写 dex 二进制补丁改 field_ids 会触发 `Out-of-order field_ids` 拒载整个 dex，禁止；必须走 smali 源文件 → apktool b 流程
+> - **配置恢复**：接口配置在 `shared_prefs/api_provider_configs.xml`（key=providers_v1），无 root 用 `run-as` 读写；模板在 `D:\hunyuan-multiweb\api_provider_configs.xml`（Agnes+智谱明文 Key，卸载重装后可恢复）
+
+## 1. 当前设备上运行版本
+
+- **APK**：`D:\reasonix\hunyuan multiweb\base-agnes-mod.apk`（25,564,882 字节，2026-09-03 22:30 构建）
+- **包名**：`com.wenwei.deepseekproxy.multiweb`
+- **状态**：App 启动正常（PID 19316，零 FATAL / 零 VerifyError），视频生成能成功创建任务但**生一半闪退**（待调查）
+- **备份位置**：`D:\Users\Administrator\Desktop\备份\混元MultiWeb-视频协议全修复版.apk`（最新已更新）
+
+## 2. 工作环境
+
+| 工具 | 路径 |
+|------|------|
+| JDK | `D:\jdk17`（需设 JAVA_HOME=D:\jdk17） |
+| Android SDK | `D:\android-sdk` |
+| build-tools | `D:\android-sdk\build-tools\36.0.0`（apksigner.bat） |
+| adb | `D:\android-sdk\platform-tools\adb.exe` |
+| gradle | 通过 `gradlew.bat`（项目根） |
+| apktool | `D:\reasonix_archive\tools\apktool.jar`（2.9.3） |
+
+模拟器：emulator-5554，API 35，x86_64
+
+## 3. 关键文件位置
+
+### 3.1 项目源码
+- 项目根：`D:\reasonix\hunyuan multiweb`
+- MainActivity.kt（app 入口 / UI Composable）：`app-proxy\src\main\java\com\wenwei\deepseekproxy\MainActivity.kt`
+- ProxyViewModel：`app-proxy\src\main\java\com\wenwei\deepseekproxy\ProxyViewModel.kt`
+- OpenAiCompatibleClient（Agnes / 智谱 / OpenAI 兼容实现）：`app-proxy\src\main\java\com\wenwei\deepseekproxy\proxy\OpenAiCompatibleClient.kt`
+- ProxyServer（Ktor 本地网关）：`app-proxy\src\main\java\com\wenwei\deepseekproxy\proxy\ProxyServer.kt`
+- build.gradle（app-proxy）：`app-proxy\build.gradle`（versionName `1.0.6-no-local-image`，versionCode 7）
+- 根 build.gradle：`build.gradle`
+
+### 3.2 当前反编译工作目录（核心工作区）
+- `D:\reasonix_archive\tools\base-agnes-decoded\`（完整 apktool 反编译的 1.0.6 源码）
+  - smali_classes3\com\wenwei\deepseekproxy\MainActivityKt.smali（**本次所有 smali 修改都在这里**）
+  - smali_classes4\com\wenwei\deepseekproxy\proxy\OpenAiCompatibleClient.smali
+- 编译后输出：`D:\reasonix\hunyuan multiweb\base-agnes-mod.apk`
+- Python 辅助脚本目录：`D:\reasonix\hunyuan multiweb\*.py`（patch_*.py / fix_*.py / verify_*.py 等）
+
+### 3.3 备份与参考
+- 原始基线 APK（雷电磁盘导出）：`D:\Users\Administrator\Documents\leidian14\Pictures\混元 MultiWeb.apk`（**反编译源**，含 Agnes 视频协议修复）
+- 用户原版 APK（1.3.3 加载动画）：`D:\Users\Administrator\Desktop\混元-1.3.3-加载动画.apk`
+- 之前版本的备份：项目根 `*.apk.gbk.bak` / `*.bak` / `*.bak-uvc-revert` 等
+
+## 4. 本次会话完成的修复（已编入 `base-agnes-mod.apk`）
+
+### 4.1 UI 文本（视频设置菜单）
+- 一级菜单"清晰度"→`分辨`（2字）
+- 二级菜单标题"分辨率"保持（不变）
+- 二级菜单"无水印"→`水印`
+
+### 4.2 视频比例下拉大间隔删除
+- 删除"尺寸(WxH)"标题与 1280x720/720x1280 两个预设项
+- 改 `videoPresetSizes` 为**真正 0 长度数组**（`new-array v8, v8, [Ljava/lang/String;`）
+
+### 4.3 智谱（CogVideox-Flash）视频协议补丁
+8 处 smali 修改，全部经 curl 实测验证：
+
+| # | 位置 | 改动 |
+|---|------|------|
+| 1 | `zhipuVideoSizeFor` | 8 档白名单（1280x960/960x1280/1024x1024 等），替代原 720x1280/1280x720（会 400）|
+| 2 | `duration` | 钳 5/10（自定值归 5，>=10 归 10） |
+| 3 | `with_audio` | 透传 UI 开关（开→true / 关→false） |
+| 4 | `watermark_enabled` | 透传 UI 开关 |
+| 5 | 图生 mode | `mode:"image"` 改 `mode:"reference"`（Agnes 文档新枚举）|
+| 6 | 图生 mode | `mode:"text"` 改 `mode:"ti2vid"`（v2.0/2.5 通用）|
+| 7 | Agnes ratio | `ratio` 改 `aspect_ratio`（防止上游报"ratio is not allowed"）|
+| 8 | 图生 size | 图生分支 remove("size")（图生上游只接受默认）|
+
+### 4.4 Agnes 2.0/2.1/2.5 协议（生图）
+- `seconds` 数字 → 字符串 `"3"`–`"20"`（已改）
+
+## 5. 已撤回的尝试
+
+### 5.1 PlayerView 视频控件条（尝试 3 轮后撤回）
+- 想加 ExoPlayer `PlayerView` + `useController=true` 控件条（播放/暂停、进度、⚙️ 设置）
+- **手写 smali 反复 VerifyError**：
+  - 第 1 轮：LocalContext 字段访问 IllegalAccessError（字段是 internal）
+  - 第 2 轮：sget-object → invoke-static 改了，但 `startRestartGroup` 用了 3 寄存器（应 2 个）
+  - 第 3 轮：删了 lambda 类的 Context 依赖，但 v0 const 类型与 invoke-static 返回值类型冲突
+- **最终撤回**：恢复 `Player()` 无控件版本
+- **正确实现路径**（下次会话）：改**原始 Kotlin 源码** `UrlVideo` 函数（不用 PlayerView 而直接用 `AndroidView` + Compose lambda class），或回退到原始无控件版本
+- **当前状态**：视频可生成可下载，但播放页无控件条（用户已知）
+
+## 6. 未解决问题
+
+### 6.1 智谱视频"生一半闪退"
+- 现状：智谱任务创建成功（1067ms 后 AutoRoute 完成），但**之后轮询/下载/Player 预加载阶段闪退**
+- 已知线索：
+  - 测试基础版（base-agnes.apk）有同样问题——所以**不是本次 smali 修改造成的**
+  - 真正 base 是 雷电磁盘导出的"含 Agnes 视频协议修复"版
+- 调查方向：
+  - 抓完整 FATAL/ANR 日志（logcat -d -t 5000 窗口要够长，覆盖整个视频轮询周期 60-120 秒）
+  - 看 ProxyViewModel.generateVideo 的轮询/下载/UrlVideo 流程
+  - 可能 ExoPlayer 预加载时 OOM（视频文件 4-10MB）
+- 复现命令：
+  ```bash
+  adb -s emulator-5554 logcat -c
+  adb -s emulator-5554 shell input tap 900 1690  # 模拟点发送按钮
+  adb -s emulator-5554 logcat -d -t 5000 | grep -E "VideoRoute|VideoApi|fatal|FATAL|ANR|Player|UrlVideo"
+  ```
+
+### 6.2 视频控件条（未实现）
+- 放弃手写 smali；下次需改 Kotlin 源码
+
+## 7. 测试账号（curl 实测用）
+
+| 平台 | Key | baseUrl |
+|------|-----|---------|
+| Agnes | `<AGNES_KEY_已脱敏>` | `https://apihub.agnes-ai.cn/v1` |
+| 智谱 | `<ZHIPU_KEY_已脱敏>` | `https://open.bigmodel.cn/api/paas/v4` |
+
+## 8. 编译/安装/启动一条龙命令
+
+```bash
+# 1. 编译（apktool 重新打包反编译目录）
+cd /d "D:\reasonix_archive\tools"
+"D:\jdk17\bin\java.exe" -jar apktool.jar b base-agnes-decoded -o "D:\reasonix\hunyuan multiweb\base-agnes-mod.apk"
+
+# 2. 签名
+set JAVA_HOME=D:\jdk17 && set PATH=D:\jdk17\bin;%PATH%
+"D:\android-sdk\build-tools\36.0.0\apksigner.bat" sign ^
+  --ks "D:\Users\Administrator\.android\debug.keystore" ^
+  --ks-pass pass:android --key-pass pass:android ^
+  "D:\reasonix\hunyuan multiweb\base-agnes-mod.apk"
+
+# 3. 安装 + 启动
+"D:\android-sdk\platform-tools\adb.exe" -s emulator-5554 install -r -d "D:\reasonix\hunyuan multiweb\base-agnes-mod.apk"
+"D:\android-sdk\platform-tools\adb.exe" -s emulator-5554 shell am start -n com.wenwei.deepseekproxy.multiweb/com.wenwei.deepseekproxy.MainActivity
+```
+
+## 9. 调试 / 抓日志常用命令
+
+```bash
+# 清日志 + 等触发 + 抓 5000 行
+adb -s emulator-5554 logcat -c
+adb -s emulator-5554 shell input tap 900 1690
+adb -s emulator-5554 logcat -d -t 5000 > zhcrash.txt
+
+# 看 UI 节点
+adb -s emulator-5554 shell uiautomator dump /sdcard/ui.xml
+adb -s emulator-5554 pull /sdcard/ui.xml D:\reasonix\hunyuan multiweb\ui.xml
+
+# 截图
+adb -s emulator-5554 shell screencap -p /sdcard/now.png
+adb -s emulator-5554 pull /sdcard/now.png D:\reasonix\hunyuan multiweb\now.png
+
+# 查 App 进程
+adb -s emulator-5554 shell pidof com.wenwei.deepseekproxy.multiweb
+
+# 过滤关键 tag
+adb -s emulator-5554 logcat -d | findstr "VideoRoute VideoApi zhipu BigModel cogvideox"
+```
+
+## 10. 关键 Python 脚本（项目根目录）
+
+| 脚本 | 用途 |
+|------|------|
+| `patch1_zvsize.py` | 智谱 size 映射改 8 档 |
+| `patch2_dur.py` | 智谱 duration 钳 5/10 helper 注入 |
+| `patch3_apply.py` | 智谱 with_audio + watermark_enabled 透传 |
+| `patch4_apply.py` | 智谱图生 remove size |
+| `patch5_8.py` | Agnes 视频 size 720P + aspect_ratio + seconds 钳 3-20 |
+| `patch9_mode.py` | mode 枚举 text→ti2vid, reference→multi_reference |
+| `patch9c_ratio.py` | Agnes ratio→aspect_ratio 改名（修复残留） |
+| `verify2.py` | 验证启动 + 截图 + logcat 提取 |
+| `parse_zhcrash*.py` | 分析智谱视频崩溃日志 |
+| `find_btn*.py` | 找 UI 按钮坐标 |
+
+## 11. 注意事项 / 踩过的坑
+
+- **PowerShell 写文件会加 BOM、改 CRLF**——smali 文件禁用 PowerShell 处理（用 Python）
+- **Base64.decode("")** 静默返回空数组——必校验空
+- **String → int 解析用 toIntOrNull** + 范围检查
+- **apiProviderConfigs.xml** 用 `\\\"` 存储 JSON
+- **反编译时区 `01h-1h` 偏移**：logcat 时间戳可能与系统时间不同步
+- **`Sget-object Lkotlin/.../LocalContext;`** → IllegalAccessError，改用 `invoke-static ...->getLocalContext()`
+- **invoke-static 静态方法**不能加 this 参数（除非 `@JvmStatic`）
+- **Range 调用 `{v0 .. v5}`** 寄存器必须连续
+- **AndroidView 6 参 Object 槽**必须传 null 引用（const/4 0 也行，但 verifier 要看到 const 状态）
+- **Agnes 文档与上游实际行为**有差：官方说 mode=text/reference，实际 v2.0 报"Input should be 'ti2vid', 'keyframes' or 'multi_reference'"
+
+## 12. 下次会话建议
+
+1. **智谱视频闪退**：先抓 60 秒窗口的完整 FATAL/ANR 日志定位是轮询/下载/Player 哪一环；如果确认是 ExoPlayer 预加载 OOM，加 BufferStrategy + 懒加载
+2. **视频控件条**：找原始 Kotlin 源码（雷电磁盘导出的 APK 完整反编译带 Kt）改 `UrlVideo` 函数，不走 smali 手写
+3. **关闭闪退 flash UI**：spinner 不转、加个半透明 layer、加 Skeleton 占位
+4. **备份机制**：每次 smali 修改前 `cp file smali.bak-stepN` 编号备份
+5. **Agnes 2.0 视频 mode**：如果上游继续改枚举（最近一次是 text→ti2vid），加 helper 集中映射
+
+## 13. 前置会话（sess_8dff800b）上下文
+
+- 之前会话遗留的"Agnes 协议修复"基线（mode="text"、extra_body.response_format 等）已合入本版
+- 之前的 patch 编号延续：本会话从 patch1_zvsize 开始到 patch9_mode
+- 之前未解决的 "Vi2v_ratio 越界"、UI 文本显示 等问题已通过本次 session 部分解决
+- `sess_8dff800b` 在 D:\reasonix_archive\tools\hunyuan-multiweb-decoded 留下完整反编译产物可参考
+
+---
+
+# ⭐ 2026-09-05 凌晨追加：晚间会话完成项
+
+## 已完成并实测
+1. **音效断链修复**：executeVideo `:cond_d` 段 put key 寄存器被 "开" 覆盖 → 实际发出 `{"开":true}`；已补 `const-string v12, "with_audio"`。**实测日志实证**：body 含 `"audio":"开","with_audio":true`，200 建任务
+2. **Agnes 2.5 invalid mode 修复**：按模型名（contains "2.5"）映射 ti2vid→text、multi_reference→reference。**实测**：mode=text 200 建任务成功
+3. **自定义弹窗四项接入**：时长/分辨/帧数/比例的"自定义"点击现弹输入框（新增 LambdaCust 合成类 3 参版 + custOpen public 方法 + 分发点 v3/v4 分支）。**实测**：时长输入 8s → 写回显示 8s，零崩溃
+4. **全量编译安装**：`base-agnes-fix2-aligned.apk` 已装模拟器，交付副本 `Pictures\混元 MultiWeb-全功能修复版.apk` + `桌面备份\混元MultiWeb-全功能修复版-20260905.apk`
+5. **CNB 仓库**：密钥排查干净（clone 全量扫描零命中）；文档上传 `docs/2026-09-05/`（4 个，HANDOFF 已脱敏）。git push 认证格式：`https://hunyuan-2026:TOKEN@cnb.cool/...`
+
+## 智谱/Agnes 能力结论（详见 docs/2026-09-05/视频模型能力矩阵.md）
+- 首尾帧：cogvideox-3（image_url 两图）+ Agnes 全系（keyframe/keyframes）
+- 多图合成：仅 Agnes（2.5 reference ≤5图+3音频；v2.0 multi_reference）
+- 时长上限：智谱 10s；Agnes 2.5 12s；v2.0 ~18s（441帧@24fps）
+- 智谱 flash 自定义 8s 会被钳成 5s（只支持 5/10）
+
+## 图片接口实测（6 家，3 家可用）
+- ✓ 阶跃星辰 step-image-edit-2（step_plan/v1）、hcnsec（base 必须 /v1）、商汤 sensenova-u1.5-lite（b64_json 5MB）
+- ✗ catcat（无通道）、modelscope（余额不足+异步任务不兼容）、logfare gpt-image-2（限流中，稍后可重试）
+- 完整配置模板：`D:/hunyuan-multiweb/api_provider_configs_full.xml`（5 供应商，明文 key，push 用 run-as）
+
+## 待办
+- 模拟器上用户手动加了"猫猫"接口（catcat，当前上游无通道）；如需一键导入 5 家配置，用 api_provider_configs_full.xml（会覆盖手动条目）
+- Agnes 免费限流解除后可实测 v2.0 ~18s 长视频
+- 智谱 cogvideox-3 未配置 key 差异验证（文档推断首尾帧可行）
+
+---
+
+# ⭐ 2026-09-06 凌晨追加：Agnes 图生视频修复（fix4）
+
+## 问题与根因
+- 用户报：图生视频生成的视频与参考图无关；v2.0 报 multi_reference requires at least 2 images
+- logcat 实证：请求 body 为纯文生形状（无任何 image 字段）
+- 根因 1（图片被丢弃）：executeVideo 的 image_data→image_url 转换段有供应商白名单 `contains("bigmodel.cn") || contains("stepfun")`，Agnes baseUrl 不匹配 → 静默跳过
+- 根因 2（v2.0 形状错误）：v2.0 单图被发成 mode=multi_reference + images=[1张]，上游要求 multi_reference ≥2 张（最后一张为背景）
+
+## 修复（fix4）
+1. 白名单加 `contains("agnes")`（:goto_5 后的判断段）
+2. 新增 `fixAgnesV20Shape(JSONObject)` public static 方法 + 在 Agnes 分支 :cond_1d 前调用（invoke-static {v4} 单寄存器零污染）：
+   - model 含 "2.5" → 不动（mode=reference + images=[dataURL] 已实测 200）
+   - v2.0：单图 → put("image", url) + remove images + mode=ti2vid（文档形状）；≥2 张 → 保持 multi_reference
+
+## 实测验证（抽帧亲眼比对）
+- 参考图：GitHub Octocat 图标（272x92 png → base64 dataURL）
+- 2.5-flash：task_9GGJc82OoAb1baVVidoDNz9M5jpIUeHD → completed → 首帧=Octocat 剪影原样，中后帧同一角色动画化 ✓
+- v2.0：video_973acdbe753948abb838d57f9e3fb791 → completed → 首帧 Octocat 剪影，中帧站立动画 ✓
+- 验证帧：D:/hunyuan-multiweb/验证-25首帧/尾帧.jpg、验证-20首帧/中帧.jpg；视频 verify_25_i2v.mp4 / verify_v20_i2v.mp4
+
+## 关键实测知识
+- Agnes 2.5 媒体字段接受 `data:image/xxx;base64,` dataURL（错误信息明示 "or valid base64 data"）；过小的图（8x8）会被拒 "valid base64 data"
+- v2.0 multi_reference 语义：images ≥2 张，最后一张为背景；单图必须用 image 字段
+- 2.5 轮询：reference/keyframe 模式必须带 model_name（app 已带 ✓）
+- prompt 推荐 `<Picture 1>` 指代参考图（官方写法，贴合度更高）
+
+## 交付
+- base-agnes-fix4-aligned.apk 已装模拟器；Pictures\混元 MultiWeb-全功能修复版.apk 与桌面备份同步更新
