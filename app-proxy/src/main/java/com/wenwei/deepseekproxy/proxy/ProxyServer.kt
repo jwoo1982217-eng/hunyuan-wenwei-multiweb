@@ -1723,9 +1723,11 @@ object ProxyServer {
                     val initialStatus = json.optString(statusField, "")
                     val isAsync = if (isZhipu) initialStatus == "PROCESSING" else initialStatus in setOf("queued", "processing", "in_progress")
                     if (isAsync) {
-                        // 任务 ID：优先 video_id（Agnes），其次 id（智谱）
-                        val taskId = json.optString("video_id", "")
-                            .ifBlank { json.optString("id", json.optString("task_id", "")) }
+                        // 任务 ID：优先 task_id/id（v2.0 的 video_id 是 base64 复合ID，轮询端点不认），
+                        // 兜底 video_id
+                        val taskId = json.optString("task_id", "")
+                            .ifBlank { json.optString("id", "") }
+                            .ifBlank { json.optString("video_id", "") }
                         if (taskId.isBlank()) {
                             call.respondText(body, ContentType.parse("application/json"), HttpStatusCode.fromValue(resp.code))
                             return
@@ -1760,7 +1762,7 @@ object ProxyServer {
                                 videoUrl = if (isZhipu) {
                                     pollJson?.optJSONArray("video_result")?.optJSONObject(0)?.optString("url", "")?.takeIf { it.isNotBlank() }
                                 } else {
-                                    (pollJson?.optString("remixed_from_video_id", "") ?: "")
+                                    (pollJson?.optString("url", "") ?: "")
                                         .ifBlank { pollJson?.optJSONObject("metadata")?.optString("url", "") ?: "" }
                                         .ifBlank { pollJson?.optString("video_url", "") ?: "" }
                                 }

@@ -1612,7 +1612,16 @@ fun ProxyScreen(
                         modifier = Modifier.widthIn(max = 300.dp).padding(4.dp)
                     ) {
                         Column(Modifier.padding(10.dp)) {
-                            if (msg.text.isNotBlank()) {
+                            if (msg.text == "__VIDEO_GENERATING__") {
+                                Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                                    CircularProgressIndicator(
+                                        modifier = Modifier.size(18.dp),
+                                        strokeWidth = 2.dp
+                                    )
+                                    Spacer(Modifier.width(8.dp))
+                                    Text("视频生成中…")
+                                }
+                            } else if (msg.text.isNotBlank()) {
                                 SelectionContainer {
                                     Text(msg.text)
                                 }

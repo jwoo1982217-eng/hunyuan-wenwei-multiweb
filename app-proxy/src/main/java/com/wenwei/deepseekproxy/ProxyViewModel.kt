@@ -959,6 +959,14 @@ class ProxyViewModel(app: Application) : AndroidViewModel(app) {
             "【生成视频】$prompt",
             images = images.map { it.dataUrl }
         )
+        // 占位"生成中"气泡（带转圈），完成后原位替换
+        chatMessages.value = chatMessages.value + ChatMessageItem("assistant", "__VIDEO_GENERATING__")
+        fun replaceGeneratingPlaceholder(item: ChatMessageItem) {
+            val list = chatMessages.value.toMutableList()
+            val idx = list.indexOfLast { it.text == "__VIDEO_GENERATING__" }
+            if (idx >= 0) list[idx] = item else list.add(item)
+            chatMessages.value = list
+        }
         LogStore.i("App", "视频请求: ${prompt.take(80)} (model=${videoModel.value}, 参考图=${images.size}, 比例=$ratio, 时长=$duration, 清晰度=$resolution)")
 
         val endpoint = "http://127.0.0.1:${port.value}/v1/videos/generations"
@@ -1022,7 +1030,7 @@ class ProxyViewModel(app: Application) : AndroidViewModel(app) {
                             respBody.take(300)
                         }
                         LogStore.e("App", "视频生成失败 HTTP ${resp.code}: $err")
-                        chatMessages.value = chatMessages.value + ChatMessageItem("assistant", "⚠️ 视频生成错误: $err")
+                        replaceGeneratingPlaceholder(ChatMessageItem("assistant", "⚠️ 视频生成错误: $err"))
                         return@use
                     }
                     val data = JSONObject(respBody).optJSONArray("data") ?: JSONArray()
@@ -1037,14 +1045,14 @@ class ProxyViewModel(app: Application) : AndroidViewModel(app) {
                         } else null
                     }.filter { it.isNotBlank() }
                     if (urls.isEmpty()) {
-                        chatMessages.value = chatMessages.value + ChatMessageItem("assistant", "⚠️ 视频生成未返回结果")
+                        replaceGeneratingPlaceholder(ChatMessageItem("assistant", "⚠️ 视频生成未返回结果"))
                     } else {
-                        chatMessages.value = chatMessages.value + ChatMessageItem("assistant", videos = urls)
+                        replaceGeneratingPlaceholder(ChatMessageItem("assistant", videos = urls))
                     }
                 }
             } catch (e: Exception) {
                 LogStore.e("App", "generateVideo 异常: ${e.stackTraceToString()}")
-                chatMessages.value = chatMessages.value + ChatMessageItem("assistant", "⚠️ 视频生成错误: ${e.localizedMessage}")
+                replaceGeneratingPlaceholder(ChatMessageItem("assistant", "⚠️ 视频生成错误: ${e.localizedMessage}"))
             }
         }
     }
