@@ -1951,46 +1951,66 @@ fun UrlVideo(url: String, modifier: Modifier = Modifier) {
     }
 
     // ExoPlayer 播放器：支持软解回退，画面正常渲染
+    // 长按=保存到相册（PlayerView 会消费触摸，因此手势挂在外层 Box）
     Box(
         modifier = modifier
             .fillMaxWidth()
             .heightIn(min = 200.dp, max = 400.dp)
             .background(Color.Black)
+            .clickable { exoPlayer.playWhenReady = !exoPlayer.playWhenReady }
     ) {
         // 经典 PlayerView：只留播放键+进度条（prev/next/快进/快退全部隐藏），
         // 点击呼出/3 秒自动隐藏控制栏，长按保留"保存到相册"。
         androidx.compose.ui.viewinterop.AndroidView(
             factory = { ctx ->
-                androidx.media3.ui.PlayerView(ctx).apply {
+                SavePlayerView(ctx).apply {
                     this.player = exoPlayer
                     useController = true
-                    setShowNextButton(false)
-                    setShowPreviousButton(false)
-                    setShowFastForwardButton(false)
-                    setShowRewindButton(false)
-                    setControllerShowTimeoutMs(3000)
-                    setOnLongClickListener {
+                    setShowBuffering(androidx.media3.ui.PlayerView.SHOW_BUFFERING_ALWAYS)
+                    onLongPressSave = {
                         scope.launch {
-                            Toast.makeText(ctx, "正在保存视频…", Toast.LENGTH_SHORT).show()
+                            Toast.makeText(context, "正在保存视频…", Toast.LENGTH_SHORT).show()
                             val bytes = localFile?.takeIf { it.exists() }?.readBytes()
                                 ?: fetchImageBytes(context, url)
                             if (bytes != null) {
-                                val sha = MessageDigest.getInstance("SHA-256").digest(bytes)
-                                    .joinToString("") { "%02x".format(it) }
-                                android.util.Log.i("VideoPlayer", "保存视频: bytes=${bytes.size} sha256=$sha source=${if (localFile != null) "local-cache" else "remote"}")
                                 val ok = saveVideoToGallery(context, bytes)
-                                Toast.makeText(ctx, if (ok) "视频已保存到相册" else "保存失败", Toast.LENGTH_SHORT).show()
+                                Toast.makeText(context, if (ok) "视频已保存到相册" else "保存失败", Toast.LENGTH_SHORT).show()
                             } else {
-                                Toast.makeText(ctx, "视频获取失败", Toast.LENGTH_SHORT).show()
+                                Toast.makeText(context, "视频获取失败", Toast.LENGTH_SHORT).show()
                             }
                         }
-                        true
                     }
                 }
             },
             update = { it.player = exoPlayer },
             modifier = Modifier.fillMaxSize(),
         )
+    }
+}
+
+/** 自定义 PlayerView：控件条正常使用；长按 900ms 触发保存（自计时，不受控件消费触摸影响）。 */
+class SavePlayerView @JvmOverloads constructor(
+    context: android.content.Context,
+    attrs: android.util.AttributeSet? = null,
+) : androidx.media3.ui.PlayerView(context, attrs) {
+    var onLongPressSave: (() -> Unit)? = null
+    private val handler = android.os.Handler(android.os.Looper.getMainLooper())
+    private val longPressRunnable = Runnable { onLongPressSave?.invoke() }
+
+    override fun onTouchEvent(event: android.view.MotionEvent): Boolean {
+        when (event.actionMasked) {
+            android.view.MotionEvent.ACTION_DOWN ->
+                handler.postDelayed(longPressRunnable, 900L)
+            android.view.MotionEvent.ACTION_UP,
+            android.view.MotionEvent.ACTION_CANCEL ->
+                handler.removeCallbacks(longPressRunnable)
+        }
+        return super.onTouchEvent(event)
+    }
+
+    override fun onDetachedFromWindow() {
+        handler.removeCallbacks(longPressRunnable)
+        super.onDetachedFromWindow()
     }
 }
 

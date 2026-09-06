@@ -9,6 +9,7 @@ import android.content.Intent
 import android.os.Build
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
+import com.wenwei.deepseekproxy.R
 import com.github.jing332.deepseekproxy.proxy.LogStore
 import com.github.jing332.deepseekproxy.proxy.LocalGatewayTokenStore
 import com.github.jing332.deepseekproxy.proxy.LocalGatewayServiceLifecycle
