@@ -94,11 +94,19 @@ object OpenAiCompatibleClient {
             val id = item["id"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
             if (id.isBlank()) continue
             val metadata = element.toString().lowercase()
+            // OpenRouter 风格中转（商汤 token.sensenova.cn 等）用 output_modalities 声明输出模态，
+            // 生图模型名（sensenova-u1.5-lite / u1-fast）既不含 image 关键词也没有 type 字段，
+            // 只能靠该字段识别；input_modalities 不看（那是识图聊天，不是生图）。
+            val outputModalities = runCatching {
+                item["output_modalities"]?.jsonArray?.mapNotNull { it.jsonPrimitive.contentOrNull }
+            }.getOrNull().orEmpty()
             val explicitImage = listOf("image_generation", "image-generation", "text_to_image", "text-to-image")
-                .any(metadata::contains) || item["type"]?.jsonPrimitive?.contentOrNull.orEmpty()
+                .any(metadata::contains) || outputModalities.any { it.contains("image", ignoreCase = true) } ||
+                item["type"]?.jsonPrimitive?.contentOrNull.orEmpty()
                 .contains("image", ignoreCase = true)
             val explicitVideo = listOf("video_generation", "video-generation", "text_to_video", "text-to-video")
-                .any(metadata::contains) || item["type"]?.jsonPrimitive?.contentOrNull.orEmpty()
+                .any(metadata::contains) || outputModalities.any { it.contains("video", ignoreCase = true) } ||
+                item["type"]?.jsonPrimitive?.contentOrNull.orEmpty()
                 .contains("video", ignoreCase = true)
             val explicitChat = listOf("chat.completions", "chat_completion", "text_generation", "text-generation")
                 .any(metadata::contains)
@@ -121,6 +129,20 @@ object OpenAiCompatibleClient {
     }
 
     internal fun normalizeProviderModels(config: ApiProviderConfig, result: ApiTestResult): ApiTestResult {
+        // 智谱 /models 只返回 GLM 聊天模型，CogView/CogVideoX 从不进列表（2026-09-12 实测），
+        // 这里并入内置清单；同步"只增不删"，不影响手填模型。
+        // 仅当该供应商对应列表为空（新条目）时注入：非空说明用户在自管列表，
+        // 再注入会把用户删掉的模型加回来（同步只增不删 + 注入 = 删除被回滚的教训）。
+        if (config.baseUrl.contains("bigmodel.cn", ignoreCase = true)) {
+            val images = if (config.imageModels.isEmpty()) (result.imageModels + "cogview-3-flash").distinct() else result.imageModels
+            val videos = if (config.videoModels.isEmpty()) (result.videoModels + listOf("cogvideox-flash", "cogvideox-3")).distinct() else result.videoModels
+            val allCount = (result.chatModels + images + videos).distinct().size
+            return result.copy(
+                message = "连接成功，发现 $allCount 个模型（聊天 ${result.chatModels.size}，生图 ${images.size}，视频 ${videos.size}）",
+                imageModels = images,
+                videoModels = videos
+            )
+        }
         if (!HiApiImageClient.matches(config)) return result
         val current = result.imageModels
             .filterNot { it.equals("gpt-image-1", true) || it.equals("gpt-image-1.5", true) }
@@ -151,6 +173,38 @@ object OpenAiCompatibleClient {
         return client.newCall(Request.Builder().url(endpoint(config, "chat/completions"))
             .authorize(config).header("Content-Type", "application/json")
             .post(body.toRequestBody("application/json".toMediaType())).build()).execute()
+    }
+
+    private fun senseNovaImage(config: ApiProviderConfig, upstreamModel: String, rawRequest: String): Response {
+        val body = JSONObject(rawRequest).put("model", upstreamModel).put("watermark", false)
+        var path = "images/generations"
+        val refs = body.optJSONArray("image_data")
+        if (refs != null && refs.length() > 0) {
+            // 官方图片编辑接口（POST /v1/images/edits，JSON，同步）：images 元素必须是
+            // {"image_url": dataURL 或公网URL} 对象，裸字符串数组会 400 invalid arguments
+            path = "images/edits"
+            val images = org.json.JSONArray()
+            for (i in 0 until refs.length()) {
+                val item = refs.optJSONObject(i) ?: continue
+                val data = item.optString("data", "")
+                if (data.isBlank()) continue
+                val dataUrl = if (data.startsWith("data:")) data else run {
+                    val mime = item.optString("mime", "image/jpeg").ifBlank { "image/jpeg" }
+                    "data:$mime;base64,$data"
+                }
+                images.put(JSONObject().put("image_url", dataUrl))
+            }
+            body.put("images", images)
+            body.remove("image_data")
+            body.remove("image")
+            body.remove("image_url")
+            body.put("response_format", "b64_json")
+        }
+        return client.newCall(
+            Request.Builder().url(endpoint(config, path))
+                .authorize(config).header("Content-Type", "application/json")
+                .post(body.toString().toRequestBody("application/json".toMediaType())).build()
+        ).execute()
     }
 
     fun executeVideo(config: ApiProviderConfig, upstreamModel: String, rawRequest: String): Response {
@@ -397,6 +451,14 @@ object OpenAiCompatibleClient {
             rawRequest.contains("\"image_data\"")
         ) {
             return catcatGrokImageEdit(config, rawRequest)
+        }
+        // 商汤（token.sensenova.cn）：文生图走 generations；图生图走官方图片编辑接口
+        // POST /v1/images/edits（JSON，同步），images 元素必须是 {"image_url": dataURL|公网URL}
+        // 对象（裸字符串数组在 generations 会被上游随机忽略、在 edits 直接 400）；
+        // watermark:false 去水印（实测唯一有效写法，watermark_enabled/water_mark 无效）；
+        // edits 支持 size 直传（含 1344x3136 竖版）与 response_format:"b64_json"。
+        if (config.baseUrl.contains("sensenova", ignoreCase = true)) {
+            return senseNovaImage(config, upstreamModel, rawRequest)
         }
         val jsonBody = JSONObject(rawRequest).put("model", upstreamModel)
         // 智谱(bigmodel.cn) cogview：忠实还原旧版 APK 的适配(smali adaptToZhipuImage/zhipuSizeFor，
