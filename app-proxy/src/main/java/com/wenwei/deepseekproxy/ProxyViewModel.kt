@@ -90,7 +90,11 @@ class ProxyViewModel(app: Application) : AndroidViewModel(app) {
     private val prefs = app.getSharedPreferences("ds_proxy", Context.MODE_PRIVATE)
     private val localGatewayTokenStore = LocalGatewayTokenStore(app)
     private val gatewayStartMutex = Mutex()
+    // 本客户端只访问 127.0.0.1 本地网关，必须绕过系统代理：
+    // 否则设置了全局代理（如电脑抓包/加速代理）时，环回请求会被发给代理，
+    // 代理在远端机器上访问它自己的 127.0.0.1:8800，返回 502 Bad Gateway。
     private val http = OkHttpClient.Builder()
+        .proxy(java.net.Proxy.NO_PROXY)
         .connectTimeout(20, java.util.concurrent.TimeUnit.SECONDS)
         // ChatGPT Web image generation can legitimately finish after two minutes,
         // and WebView video generation can take up to ten. Keep the local relay
