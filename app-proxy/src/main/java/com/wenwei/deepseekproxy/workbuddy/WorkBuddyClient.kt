@@ -67,7 +67,7 @@ object WorkBuddyClient {
         val authUrl: String,
     )
 
-    const val DEFAULT_UPSTREAM_MODEL = "default-model"
+    const val DEFAULT_UPSTREAM_MODEL = "auto"
     private const val REFRESH_MARGIN_MS = 60_000L
     private const val CHAT_AGENT = "cli"
     private const val IDE_NAME = "WorkBuddy"

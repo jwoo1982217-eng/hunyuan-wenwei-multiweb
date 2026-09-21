@@ -1,6 +1,6 @@
 package com.wenwei.deepseekproxy.proxy
 
-import com.wenwei.deepseekproxy.workbuddy.WorkBuddyClient
+import com.wenwei.deepseekproxy.workbuddy.WorkBuddyModelCatalog
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
@@ -299,22 +299,9 @@ object ProviderCatalog {
             setOf(ProviderCapability.IMAGE_GENERATION),
             enabled = true,
             upstreamModelId = "raphael-basic"
-        ),
-        ProviderModel(
-            "workbuddy-web",
-            "WorkBuddy 国内版（网页授权）",
-            WebProviderType.WORKBUDDY_DOMESTIC,
-            setOf(ProviderCapability.CHAT, ProviderCapability.STREAMING),
-            upstreamModelId = WorkBuddyClient.DEFAULT_UPSTREAM_MODEL,
-        ),
-        ProviderModel(
-            "workbuddy-intl-web",
-            "WorkBuddy 国际版（网页授权）",
-            WebProviderType.WORKBUDDY_INTL,
-            setOf(ProviderCapability.CHAT, ProviderCapability.STREAMING),
-            upstreamModelId = WorkBuddyClient.DEFAULT_UPSTREAM_MODEL,
         )
-    )
+        // WorkBuddy 国内/国际版各 16 个模型由 WorkBuddyModelCatalog 展开（对照精排小说调用契约）
+    ) + WorkBuddyModelCatalog.providerModels()
 
     val enabledModels: List<ProviderModel> get() =
         (models.filter { it.enabled } + runtimeModels.filter { it.enabled })
