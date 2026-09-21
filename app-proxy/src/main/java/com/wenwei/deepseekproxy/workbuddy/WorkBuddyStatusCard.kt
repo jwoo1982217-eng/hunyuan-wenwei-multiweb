@@ -42,7 +42,8 @@ fun WorkBuddyStatusCard(modifier: Modifier = Modifier) {
             style = MaterialTheme.typography.titleSmall,
             modifier = Modifier.padding(vertical = 4.dp)
         )
-        WorkBuddyClient.Region.entries.forEach { region ->
+        // 只用国内版（对齐精排小说调用链路）
+        listOf(WorkBuddyClient.Region.DOMESTIC).forEach { region ->
             val loggedIn = remember(tick, region) { WorkBuddyCredentialStore.isLoggedIn(region) }
             Row(
                 Modifier.fillMaxWidth(),

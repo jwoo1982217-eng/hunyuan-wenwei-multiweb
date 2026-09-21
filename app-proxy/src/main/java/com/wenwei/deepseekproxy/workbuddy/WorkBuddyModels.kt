@@ -35,23 +35,14 @@ object WorkBuddyModelCatalog {
 
     private val chatCaps = setOf(ProviderCapability.CHAT, ProviderCapability.STREAMING)
 
-    /** 展开为网关模型目录：国内版 16 个 + 国际版 16 个。 */
-    fun providerModels(): List<ProviderModel> = all.flatMap { entry ->
-        listOf(
-            ProviderModel(
-                publicModelId = "workbuddy-" + entry.upstreamName,
-                displayName = "WorkBuddy " + entry.displayName,
-                providerType = WebProviderType.WORKBUDDY_DOMESTIC,
-                capabilities = chatCaps,
-                upstreamModelId = entry.upstreamName,
-            ),
-            ProviderModel(
-                publicModelId = "workbuddy-intl-" + entry.upstreamName,
-                displayName = "WorkBuddy 国际版 " + entry.displayName,
-                providerType = WebProviderType.WORKBUDDY_INTL,
-                capabilities = chatCaps,
-                upstreamModelId = entry.upstreamName,
-            ),
+    /** 展开为网关模型目录：国内版 16 个（只用国内版，对齐精排小说调用链路）。 */
+    fun providerModels(): List<ProviderModel> = all.map { entry ->
+        ProviderModel(
+            publicModelId = "workbuddy-" + entry.upstreamName,
+            displayName = "WorkBuddy " + entry.displayName,
+            providerType = WebProviderType.WORKBUDDY_DOMESTIC,
+            capabilities = chatCaps,
+            upstreamModelId = entry.upstreamName,
         )
     }
 }

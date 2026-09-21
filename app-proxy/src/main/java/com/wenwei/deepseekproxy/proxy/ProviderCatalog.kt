@@ -84,9 +84,8 @@ enum class WebProviderType(
     ),
     ZHIPU_GUEST("智谱免登录", null, emptyList()),
     // WorkBuddy 走插件 token 授权流（动态 authUrl），不进 Cookie 浏览器登录列表，
-    // 登录入口在「浏览器」页的 WorkBuddyStatusCard。
+    // 登录入口在「浏览器」页的 WorkBuddyStatusCard。只用国内版（对齐精排小说调用链路）。
     WORKBUDDY_DOMESTIC("WorkBuddy 国内版", null, emptyList()),
-    WORKBUDDY_INTL("WorkBuddy 国际版", null, emptyList()),
     RAPHAEL_WEB(
         "Raphael Web",
         "https://raphael.app/zh",

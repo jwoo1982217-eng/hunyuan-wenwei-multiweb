@@ -545,10 +545,8 @@ object ProxyServer {
                 handleZhipuChat(registeredModel, req, completionId, created)
                 return
             }
-            // WorkBuddy 网页登录授权（插件 token 流），路由体在 WorkBuddyRoute.kt
-            if (registeredModel.providerType == WebProviderType.WORKBUDDY_DOMESTIC ||
-                registeredModel.providerType == WebProviderType.WORKBUDDY_INTL
-            ) {
+            // WorkBuddy 网页登录授权（插件 token 流），路由体在 WorkBuddyRoute.kt，只用国内版
+            if (registeredModel.providerType == WebProviderType.WORKBUDDY_DOMESTIC) {
                 handleWorkBuddyChat(registeredModel, req, completionId, created)
                 return
             }

@@ -23,10 +23,8 @@ internal suspend fun RoutingContext.handleWorkBuddyChat(
     completionId: String,
     created: Int,
 ) {
-    val region = when (model.providerType) {
-        WebProviderType.WORKBUDDY_INTL -> WorkBuddyClient.Region.INTERNATIONAL
-        else -> WorkBuddyClient.Region.DOMESTIC
-    }
+    // 只用国内版（对齐精排小说调用链路）
+    val region = WorkBuddyClient.Region.DOMESTIC
     if (!WorkBuddyCredentialStore.isLoggedIn(region)) {
         call.respond(
             HttpStatusCode.ServiceUnavailable,
@@ -38,7 +36,8 @@ internal suspend fun RoutingContext.handleWorkBuddyChat(
         respondProviderText(req, completionId, created) { emit ->
             withContext(Dispatchers.IO) {
                 val messages = req.messages.map { it.role to it.textContent() }
-                val temperature = req.temperature ?: 0.6
+                // 对齐精排小说：默认 temperature 0.1
+                val temperature = req.temperature ?: 0.1
                 val credential = WorkBuddyCredentialStore.freshCredential(region)
                     ?: throw WorkBuddyUnauthorizedException("WorkBuddy 登录已失效，请重新登录")
                 try {
