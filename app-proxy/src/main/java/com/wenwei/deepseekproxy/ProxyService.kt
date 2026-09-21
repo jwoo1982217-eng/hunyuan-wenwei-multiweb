@@ -14,6 +14,7 @@ import com.wenwei.deepseekproxy.proxy.LocalGatewayTokenStore
 import com.wenwei.deepseekproxy.proxy.LocalGatewayServiceLifecycle
 import com.wenwei.deepseekproxy.proxy.ProxyServer
 import com.wenwei.deepseekproxy.proxy.DeepSeekPowWebView
+import com.wenwei.deepseekproxy.workbuddy.WorkBuddyCredentialStore
 
 /** Foreground host for a local gateway that the user must start explicitly. */
 class ProxyService : android.app.Service() {
@@ -30,6 +31,7 @@ class ProxyService : android.app.Service() {
 
     override fun onCreate() {
         super.onCreate()
+        WorkBuddyCredentialStore.attach(this)
         createChannel()
         runCatching {
             assets.open("sha3_wasm_bg.wasm").use { DeepSeekPowWebView.init(this, it.readBytes()) }

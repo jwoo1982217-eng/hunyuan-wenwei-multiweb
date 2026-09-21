@@ -1,5 +1,6 @@
 package com.wenwei.deepseekproxy.proxy
 
+import com.wenwei.deepseekproxy.workbuddy.WorkBuddyClient
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
@@ -82,6 +83,10 @@ enum class WebProviderType(
         listOf("https://arena.ai")
     ),
     ZHIPU_GUEST("智谱免登录", null, emptyList()),
+    // WorkBuddy 走插件 token 授权流（动态 authUrl），不进 Cookie 浏览器登录列表，
+    // 登录入口在「浏览器」页的 WorkBuddyStatusCard。
+    WORKBUDDY_DOMESTIC("WorkBuddy 国内版", null, emptyList()),
+    WORKBUDDY_INTL("WorkBuddy 国际版", null, emptyList()),
     RAPHAEL_WEB(
         "Raphael Web",
         "https://raphael.app/zh",
@@ -294,6 +299,20 @@ object ProviderCatalog {
             setOf(ProviderCapability.IMAGE_GENERATION),
             enabled = true,
             upstreamModelId = "raphael-basic"
+        ),
+        ProviderModel(
+            "workbuddy-web",
+            "WorkBuddy 国内版（网页授权）",
+            WebProviderType.WORKBUDDY_DOMESTIC,
+            setOf(ProviderCapability.CHAT, ProviderCapability.STREAMING),
+            upstreamModelId = WorkBuddyClient.DEFAULT_UPSTREAM_MODEL,
+        ),
+        ProviderModel(
+            "workbuddy-intl-web",
+            "WorkBuddy 国际版（网页授权）",
+            WebProviderType.WORKBUDDY_INTL,
+            setOf(ProviderCapability.CHAT, ProviderCapability.STREAMING),
+            upstreamModelId = WorkBuddyClient.DEFAULT_UPSTREAM_MODEL,
         )
     )
 

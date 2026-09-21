@@ -38,6 +38,11 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+        <!-- WorkBuddy 网页登录授权页（插件 token 流，非 Cookie 抓取） -->
+        <activity
+            android:name=".workbuddy.WorkBuddyLoginActivity"
+            android:exported="false"
+            android:configChanges="orientation|screenSize|keyboardHidden" />
     </application>
 
 </manifest>

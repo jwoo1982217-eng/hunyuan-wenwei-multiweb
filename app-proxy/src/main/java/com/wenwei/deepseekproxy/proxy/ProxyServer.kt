@@ -545,6 +545,13 @@ object ProxyServer {
                 handleZhipuChat(registeredModel, req, completionId, created)
                 return
             }
+            // WorkBuddy 网页登录授权（插件 token 流），路由体在 WorkBuddyRoute.kt
+            if (registeredModel.providerType == WebProviderType.WORKBUDDY_DOMESTIC ||
+                registeredModel.providerType == WebProviderType.WORKBUDDY_INTL
+            ) {
+                handleWorkBuddyChat(registeredModel, req, completionId, created)
+                return
+            }
             if (isBuiltInBrowserRelay(registeredModel.providerType)) {
                 handleBuiltInBrowserChat(registeredModel, req, completionId, created)
                 return
@@ -589,7 +596,7 @@ object ProxyServer {
         }
     }
 
-    private suspend fun RoutingContext.respondProviderText(
+    internal suspend fun RoutingContext.respondProviderText(
         req: ChatCompletionRequest,
         completionId: String,
         created: Int,

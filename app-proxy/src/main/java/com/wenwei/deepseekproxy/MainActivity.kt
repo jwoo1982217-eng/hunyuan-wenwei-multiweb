@@ -1,4 +1,4 @@
-﻿package com.wenwei.deepseekproxy
+package com.wenwei.deepseekproxy
 
 import android.Manifest
 import android.content.Context
@@ -72,6 +72,8 @@ import com.wenwei.deepseekproxy.proxy.CustomWebProviderConfig
 import com.wenwei.deepseekproxy.proxy.BrowserRelayActivation
 import com.wenwei.deepseekproxy.proxy.isKnownCustomWebImagePage
 import com.wenwei.deepseekproxy.proxy.customWebImageModelId
+import com.wenwei.deepseekproxy.workbuddy.WorkBuddyCredentialStore
+import com.wenwei.deepseekproxy.workbuddy.WorkBuddyStatusCard
 import android.graphics.BitmapFactory
 import android.graphics.Bitmap
 import android.content.ContentValues
@@ -279,6 +281,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        WorkBuddyCredentialStore.attach(this)
         android.util.Log.i("MainActivity", "=== onCreate called, app starting ===")
         setContent { App(vm) }
     }
@@ -2905,6 +2908,8 @@ fun BrowserScreen(
                 }
             }
         }
+        // WorkBuddy 网页登录授权（插件 token 流）入口与状态，自包含组件见 workbuddy/WorkBuddyStatusCard.kt
+        WorkBuddyStatusCard(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp))
         if (provider == WebProviderType.CHATGPT_WEB) {
             Row(
                 Modifier.fillMaxWidth().padding(horizontal = 8.dp),
