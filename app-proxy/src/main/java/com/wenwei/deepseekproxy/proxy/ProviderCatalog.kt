@@ -91,7 +91,13 @@ enum class WebProviderType(
         "https://raphael.app/zh",
         listOf("https://raphael.app")
     ),
-    OPENAI_COMPATIBLE("API 接口", null, emptyList());
+    OPENAI_COMPATIBLE("API 接口", null, emptyList()),
+    APPBMS("AppBMS 生图", null, emptyList()),
+    ZHIPU_WEB(
+        "智谱清言(登录)",
+        "https://chatglm.cn/",
+        listOf("https://chatglm.cn", "https://www.chatglm.cn")
+    );
 
     val supportsWebLogin: Boolean get() = loginUrl != null
 }
@@ -298,9 +304,40 @@ object ProviderCatalog {
             setOf(ProviderCapability.IMAGE_GENERATION),
             enabled = true,
             upstreamModelId = "raphael-basic"
-        )
+        ),
+        ProviderModel(
+            "zhipu-glm-web",
+            "清言GLM 登录·快速",
+            WebProviderType.ZHIPU_WEB,
+            setOf(ProviderCapability.CHAT, ProviderCapability.STREAMING),
+            upstreamModelId = "",
+        ),
+        ProviderModel(
+            "zhipu-glm-think-web",
+            "清言GLM 登录·深度思考",
+            WebProviderType.ZHIPU_WEB,
+            setOf(ProviderCapability.CHAT, ProviderCapability.STREAMING),
+            upstreamModelId = "zero",
+        ),
+        ProviderModel(
+            "zhipu-glm-research-web",
+            "清言GLM 登录·深度研究",
+            WebProviderType.ZHIPU_WEB,
+            setOf(ProviderCapability.CHAT, ProviderCapability.STREAMING),
+            upstreamModelId = "deep_research",
+        ),
         // WorkBuddy 国内/国际版各 16 个模型由 WorkBuddyModelCatalog 展开（对照精排小说调用契约）
-    ) + WorkBuddyModelCatalog.providerModels()
+    ) + WorkBuddyModelCatalog.providerModels() + AppBmsImageClient.MODELS.map { m ->
+        // AppBMS 46 个生图模型：手机流量/住宅宽带直连上游（上游封机房 IP），无需登录
+        ProviderModel(
+            "bms-$m",
+            m,
+            WebProviderType.APPBMS,
+            setOf(ProviderCapability.IMAGE_GENERATION),
+            enabled = true,
+            upstreamModelId = m,
+        )
+    }
 
     val enabledModels: List<ProviderModel> get() =
         (models.filter { it.enabled } + runtimeModels.filter { it.enabled })

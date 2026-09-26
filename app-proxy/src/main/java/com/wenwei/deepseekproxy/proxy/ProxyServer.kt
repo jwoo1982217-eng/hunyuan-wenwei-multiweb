@@ -203,6 +203,7 @@ object ProxyServer {
     private val cookieRotationIdx = java.util.concurrent.atomic.AtomicInteger(0)
     @Volatile private var webSessions: List<SavedWebSession> = emptyList()
     private val kimiRotationIdx = java.util.concurrent.atomic.AtomicInteger(0)
+    private val zhipuWebRotationIdx = java.util.concurrent.atomic.AtomicInteger(0)
     private val deepSeekRotationIdx = java.util.concurrent.atomic.AtomicInteger(0)
     private val qwenRotationIdx = java.util.concurrent.atomic.AtomicInteger(0)
     private val deepSeekRequestMutex = Mutex()
@@ -545,6 +546,11 @@ object ProxyServer {
                 handleZhipuChat(registeredModel, req, completionId, created)
                 return
             }
+            // 智谱清言登录版（chatglm.cn 账号态；与免登录游客通道完全独立）
+            if (registeredModel.providerType == WebProviderType.ZHIPU_WEB) {
+                handleZhipuAuthedChat(registeredModel, req, completionId, created)
+                return
+            }
             // WorkBuddy 网页登录授权（插件 token 流），路由体在 WorkBuddyRoute.kt，只用国内版
             if (registeredModel.providerType == WebProviderType.WORKBUDDY_DOMESTIC) {
                 handleWorkBuddyChat(registeredModel, req, completionId, created)
@@ -696,6 +702,30 @@ object ProxyServer {
     private fun deepSeekPrompt(messages: List<ChatMessage>): String = messages
         .filter { it.textContent().isNotBlank() }
         .joinToString("\n\n") { it.textContent() }
+
+    /** 智谱清言登录版：用保存的账号凭据调 GLM 流式接口，响应由 respondProviderText 统一封装。 */
+    private suspend fun RoutingContext.handleZhipuAuthedChat(
+        model: ProviderModel,
+        req: ChatCompletionRequest,
+        completionId: String,
+        created: Int,
+    ) {
+        val raw = nextAuthorization(WebProviderType.ZHIPU_WEB, zhipuWebRotationIdx)
+        val token = ZhipuAuthedClient.extractToken(raw)
+        if (token.isBlank()) {
+            call.respond(HttpStatusCode.ServiceUnavailable, mapOf("error" to "请先在浏览器登录智谱清言并保存会话"))
+            return
+        }
+        respondProviderText(req, completionId, created) { emit ->
+            withContext(Dispatchers.IO) {
+                ZhipuAuthedClient.chatCompletion(
+                    req.messages, token, raw, model.upstreamModelId,
+                ).use { response ->
+                    ZhipuAuthedClient.decodeSse(response.body!!.source(), emit)
+                }
+            }
+        }
+    }
 
     private suspend fun RoutingContext.handleDeepSeekChat(
         req: ChatCompletionRequest,
@@ -1497,6 +1527,28 @@ object ProxyServer {
                         "type" to "webview_automation_error", "code" to e.code,
                         "message" to (e.message ?: e.code)
                     )))
+                }
+                return
+            }
+            if (registered.providerType == WebProviderType.APPBMS) {
+                try {
+                    val ratio = resolveRatio(if (size.isNotBlank()) size else defaultImageSize)
+                    val urls = withContext(Dispatchers.IO) {
+                        AppBmsImageClient.generateImage(prompt, ratio, registered.upstreamModelId)
+                    }
+                    if (urls.isEmpty()) {
+                        call.respond(HttpStatusCode.BadGateway, mapOf("error" to "AppBMS 生图未返回图片"))
+                    } else {
+                        call.respond(ImageGenResponse(
+                            created = (System.currentTimeMillis() / 1000).toInt(),
+                            data = urls.map(::ImageDataItem),
+                        ))
+                    }
+                } catch (e: Exception) {
+                    LogStore.e("AppBmsImage", e.stackTraceToString())
+                    call.respond(HttpStatusCode.BadGateway, mapOf(
+                        "error" to (e.localizedMessage ?: "AppBMS 生图失败")
+                    ))
                 }
                 return
             }

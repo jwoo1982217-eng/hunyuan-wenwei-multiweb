@@ -2815,6 +2815,25 @@ fun BrowserScreen(
                                 }
                             }
                         }
+                    } else if (provider == WebProviderType.ZHIPU_WEB) {
+                        val view = webViewRef.value
+                        if (view == null) {
+                            toast = "清言页面尚未打开"
+                        } else {
+                            view.evaluateJavascript(
+                                """
+                                (()=>{let token='';try{for(let i=0;i<localStorage.length;i++){const v=String(localStorage.getItem(localStorage.key(i))||'');const bare=v.replace(/^Bearer\s+/i,'').replace(/^"|"$/g,'');if(!token&&/^eyJ/.test(bare))token=bare;}}catch(e){}return token;})()
+                                """.trimIndent()
+                            ) { raw ->
+                                val token = decodeJavascriptString(raw)
+                                onSessionSaved(provider, accountName, cookies, token, emptyMap(), emptyMap())
+                                toast = if (token.isNotBlank()) {
+                                    "已保存并验证 ${provider.displayName} 登录会话"
+                                } else {
+                                    "已保存 Cookie（未抓到 token；如调用失败，请在清言页面发一条消息后重新保存）"
+                                }
+                            }
+                        }
                     } else {
                         onSessionSaved(provider, accountName, cookies, "", emptyMap(), emptyMap())
                         toast = "已保存并验证 ${provider.displayName} 登录会话"
