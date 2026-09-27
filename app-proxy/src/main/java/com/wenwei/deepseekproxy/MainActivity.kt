@@ -3218,6 +3218,9 @@ fun BrowserScreen(
                             if (view != null && com.wenwei.deepseekproxy.proxy.isBuiltInBrowserRelay(currentBrowserProvider)) {
                                 val config = com.wenwei.deepseekproxy.proxy.builtInBrowserRelayConfig(currentBrowserProvider)
                                 com.wenwei.deepseekproxy.proxy.CustomWebChatAutomation.attach(view, config.id)
+                                // 内置中继的生图自动化也要挂接（竞技场免登录生图等），
+                                // 否则 generateImage 永远等不到 WebView 报 webview_not_ready
+                                com.wenwei.deepseekproxy.proxy.CustomWebImageAutomation.attach(view, config.id)
                                 com.wenwei.deepseekproxy.proxy.CustomWebChatAutomation.armPermissionToastBlocker(view)
                             }
                         }

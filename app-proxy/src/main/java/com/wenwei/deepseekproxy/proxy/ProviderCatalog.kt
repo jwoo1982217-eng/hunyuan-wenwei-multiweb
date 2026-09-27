@@ -297,6 +297,29 @@ object ProviderCatalog {
             WebProviderType.ARENA_GUEST,
             setOf(ProviderCapability.CHAT, ProviderCapability.STREAMING),
         ),
+        // 竞技场（arena.ai）免登录生图：对齐 WebAI2API lmarena 适配器（同站点），
+        // /image/direct 模式带模型选择器；upstreamModelId 为空则用页面默认模型。
+        ProviderModel(
+            "arena-image-web",
+            "竞技场 免登录生图",
+            WebProviderType.ARENA_GUEST,
+            setOf(ProviderCapability.IMAGE_GENERATION),
+            upstreamModelId = "",
+        ),
+        ProviderModel(
+            "arena-gpt-image-2",
+            "竞技场 GPT Image 2",
+            WebProviderType.ARENA_GUEST,
+            setOf(ProviderCapability.IMAGE_GENERATION),
+            upstreamModelId = "gpt-image-2",
+        ),
+        ProviderModel(
+            "arena-gpt-image-1.5",
+            "竞技场 GPT Image 1.5 高保真",
+            WebProviderType.ARENA_GUEST,
+            setOf(ProviderCapability.IMAGE_GENERATION),
+            upstreamModelId = "gpt-image-1.5-high-fidelity",
+        ),
         ProviderModel(
             "raphael-image-web",
             "Raphael 免费生图",

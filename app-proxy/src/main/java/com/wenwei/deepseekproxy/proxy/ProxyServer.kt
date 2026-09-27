@@ -1589,6 +1589,28 @@ object ProxyServer {
                 }
                 return
             }
+            if (registered.providerType == WebProviderType.ARENA_GUEST) {
+                // 竞技场（arena.ai）免登录生图：复用内置浏览器中继配置，
+                // upstreamModelId 非空时在 /image/direct 页切换模型（如 gpt-image-2）
+                try {
+                    val ratio = resolveRatio(if (size.isNotBlank()) size else defaultImageSize)
+                    val config = builtInBrowserRelayConfig(WebProviderType.ARENA_GUEST)
+                    val urls = CustomWebImageAutomation.generateImage(
+                        config, prompt, ratio, emptyList(), registered.upstreamModelId
+                    )
+                    call.respond(ImageGenResponse(
+                        created = (System.currentTimeMillis() / 1000).toInt(),
+                        data = urls.map(::ImageDataItem)
+                    ))
+                } catch (e: WebAutomationException) {
+                    LogStore.e("ArenaImage", "${e.code}: ${e.message}")
+                    call.respond(HttpStatusCode.ServiceUnavailable, mapOf("error" to mapOf(
+                        "type" to "webview_automation_error", "code" to e.code,
+                        "message" to (e.message ?: e.code)
+                    )))
+                }
+                return
+            }
             if (registered.providerType == WebProviderType.CUSTOM_WEB) {
                 val config = CustomWebProviderRegistry.find(registered.accountId)
                 if (config == null) {

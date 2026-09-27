@@ -8,6 +8,7 @@ import android.os.Looper
 import android.net.Uri
 import android.webkit.CookieManager
 import android.webkit.WebView
+import android.view.KeyEvent
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.sync.Mutex
@@ -1172,10 +1173,10 @@ object CustomWebImageAutomation {
     fun detach(view: WebView) { if (attached?.first === view) attached = null }
     fun attachedConfigId(): String? = attached?.second
 
-    suspend fun generateImage(config: CustomWebProviderConfig, prompt: String, ratio: String?, refImages: List<ChatAttachment> = emptyList()): List<String> = lock.withLock {
+    suspend fun generateImage(config: CustomWebProviderConfig, prompt: String, ratio: String?, refImages: List<ChatAttachment> = emptyList(), arenaModelId: String = ""): List<String> = lock.withLock {
         val (view, _) = awaitAttached(config)
         if (isArenaGuestWebConfig(config)) {
-            return@withLock generateArenaImage(view, config, prompt, ratio)
+            return@withLock generateArenaImage(view, config, prompt, ratio, arenaModelId)
         }
         if (isKnownCustomWebHybridImagePage(config.loginUrl)) {
             return@withLock generateLongCat(view, config, prompt, refImages)
@@ -1239,6 +1240,7 @@ object CustomWebImageAutomation {
         config: CustomWebProviderConfig,
         prompt: String,
         ratio: String?,
+        modelId: String = "",
     ): List<String> {
         checkArenaImageBlocker(view)
         val imageModeReady = evaluate(view, ARENA_IMAGE_MODE_READY_SCRIPT) == "true"
@@ -1271,6 +1273,18 @@ object CustomWebImageAutomation {
                     "Arena.ai Image 模式加载超时，请在浏览器打开 Image 页面后重试"
                 )
             }
+        }
+
+        // 指定模型时先在模型选择器里切换（对齐 WebAI2API lmarena 适配器的键盘流）。
+        // 选择失败不阻断：记录日志后继续使用页面当前默认模型。
+        if (modelId.isNotBlank()) {
+            val selected = runCatching { selectArenaModel(view, modelId) }
+                .onFailure { LogStore.w("CustomWebImage", "Arena 模型切换异常：${it.message}") }
+                .getOrDefault(false)
+            LogStore.i(
+                "CustomWebImage",
+                "Arena 模型选择 $modelId：${if (selected) "已选中" else "未确认，使用页面默认模型"}"
+            )
         }
 
         val baselineJson = evaluate(
@@ -1402,6 +1416,60 @@ object CustomWebImageAutomation {
             "${config.name} 已提交 Arena 生图请求，但没有识别到新图片"
         )
     }
+
+    /**
+     * 在 Arena Image Direct 页选择模型（对齐 WebAI2API lmarena 适配器的键盘流）。
+     * 模型选择器没有稳定 CSS 契约，官方适配器同样用键盘导航：
+     * 输入框聚焦 → Shift+Tab×2 落在选择器 → Enter 打开 → 键入模型 id 过滤 → Enter 选中。
+     *
+     * @return true=看到匹配选项并完成确认；false=未能确认（调用方回退页面默认模型）
+     */
+    private suspend fun selectArenaModel(view: WebView, modelId: String): Boolean {
+        val focused = evaluate(view, """
+            (()=>{const t=[...document.querySelectorAll('textarea')]
+              .find(e=>/describe the image/i.test(e.getAttribute('placeholder')||''))
+              ||document.querySelector('textarea');
+              if(!t)return 'no'; t.focus(); return 'ok'})()
+        """.trimIndent())
+        if (focused != "ok") return false
+        delay(150)
+        repeat(2) {
+            sendArenaKey(view, KeyEvent.KEYCODE_TAB, KeyEvent.META_SHIFT_ON)
+            delay(120)
+        }
+        sendArenaKey(view, KeyEvent.KEYCODE_ENTER)
+        delay(400)
+        // execCommand 触发 React 受控组件的真实输入更新
+        evaluate(view, "document.execCommand('insertText', false, ${JSONObject.quote(modelId)}), 'ok'")
+        val optionDeadline = System.currentTimeMillis() + 5_000
+        var found = false
+        while (System.currentTimeMillis() < optionDeadline) {
+            delay(250)
+            found = evaluate(view, """
+                (()=>{const o=[...document.querySelectorAll('[role="option"]')]
+                  .find(e=>(e.textContent||'').includes(${JSONObject.quote(modelId)}));
+                  return o?'yes':'no'})()
+            """.trimIndent()) == "yes"
+            if (found) break
+        }
+        if (!found) {
+            // 没过滤出选项：Escape 关掉选择器，避免污染后续提示词输入
+            sendArenaKey(view, KeyEvent.KEYCODE_ESCAPE)
+            return false
+        }
+        delay(200)
+        sendArenaKey(view, KeyEvent.KEYCODE_ENTER)
+        delay(300)
+        return true
+    }
+
+    /** 向 WebView 派发系统级可信键盘事件（页面无法区分与真实按键）。 */
+    private suspend fun sendArenaKey(view: WebView, keyCode: Int, metaState: Int = 0) =
+        withContext(Dispatchers.Main) {
+            val now = android.os.SystemClock.uptimeMillis()
+            view.dispatchKeyEvent(KeyEvent(now, now, KeyEvent.ACTION_DOWN, keyCode, 0, metaState))
+            view.dispatchKeyEvent(KeyEvent(now, now, KeyEvent.ACTION_UP, keyCode, 0, metaState))
+        }
 
     private suspend fun checkArenaImageBlocker(view: WebView) {
         val blocker = evaluate(view, """
@@ -2011,7 +2079,8 @@ object CustomWebImageAutomation {
     private fun decode(raw: String?): String = if (raw == null || raw == "null") "" else
         runCatching { JSONArray("[$raw]").getString(0) }.getOrDefault(raw)
 
-    private const val ARENA_IMAGE_URL = "https://arena.ai/image"
+    // /image/direct 直达模式带模型选择器（对齐 WebAI2API lmarena 适配器的 TARGET_URL）
+    private const val ARENA_IMAGE_URL = "https://arena.ai/image/direct"
     private val ARENA_IMAGE_MODE_READY_SCRIPT = """
         (() => [...document.querySelectorAll('textarea')]
           .some(e=>/describe the image/i.test(e.getAttribute('placeholder')||'')))()
