@@ -297,29 +297,8 @@ object ProviderCatalog {
             WebProviderType.ARENA_GUEST,
             setOf(ProviderCapability.CHAT, ProviderCapability.STREAMING),
         ),
-        // 竞技场（arena.ai）免登录生图：对齐 WebAI2API lmarena 适配器（同站点），
-        // /image/direct 模式带模型选择器；upstreamModelId 为空则用页面默认模型。
-        ProviderModel(
-            "arena-image-web",
-            "竞技场 免登录生图",
-            WebProviderType.ARENA_GUEST,
-            setOf(ProviderCapability.IMAGE_GENERATION),
-            upstreamModelId = "",
-        ),
-        ProviderModel(
-            "arena-gpt-image-2",
-            "竞技场 GPT Image 2",
-            WebProviderType.ARENA_GUEST,
-            setOf(ProviderCapability.IMAGE_GENERATION),
-            upstreamModelId = "gpt-image-2",
-        ),
-        ProviderModel(
-            "arena-gpt-image-1.5",
-            "竞技场 GPT Image 1.5 高保真",
-            WebProviderType.ARENA_GUEST,
-            setOf(ProviderCapability.IMAGE_GENERATION),
-            upstreamModelId = "gpt-image-1.5-high-fidelity",
-        ),
+        // 竞技场比赛生图模型（45 个）统一在 ArenaImageModels.kt 维护，
+        // 对齐 WebAI2API lmarena 适配器清单（仅纯文生图模型）
         ProviderModel(
             "raphael-image-web",
             "Raphael 免费生图",
@@ -350,7 +329,7 @@ object ProviderCatalog {
             upstreamModelId = "deep_research",
         ),
         // WorkBuddy 国内/国际版各 16 个模型由 WorkBuddyModelCatalog 展开（对照精排小说调用契约）
-    ) + WorkBuddyModelCatalog.providerModels() + AppBmsImageClient.MODELS.map { m ->
+    ) + WorkBuddyModelCatalog.providerModels() + ArenaImageModels.providerModels() + AppBmsImageClient.MODELS.map { m ->
         // AppBMS 46 个生图模型：手机流量/住宅宽带直连上游（上游封机房 IP），无需登录
         ProviderModel(
             "bms-$m",

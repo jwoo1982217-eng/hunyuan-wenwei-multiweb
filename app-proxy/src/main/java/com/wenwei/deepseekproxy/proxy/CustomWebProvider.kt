@@ -1418,50 +1418,101 @@ object CustomWebImageAutomation {
     }
 
     /**
-     * 在 Arena Image Direct 页选择模型（对齐 WebAI2API lmarena 适配器的键盘流）。
-     * 模型选择器没有稳定 CSS 契约，官方适配器同样用键盘导航：
-     * 输入框聚焦 → Shift+Tab×2 落在选择器 → Enter 打开 → 键入模型 id 过滤 → Enter 选中。
+     * 在 Arena Image Direct 页选择模型（CDP 实测定案的流程）：
+     * 1. 可信触摸点击模型选择器按钮（显示当前模型名、aria-haspopup=dialog、无 aria-label）
+     * 2. 等待搜索框 input[placeholder="Search models"] 出现，React 受控方式键入模型 id
+     * 3. 可信触摸点击匹配选项（BUTTON 内 font-mono SPAN 文本含模型 id）
      *
-     * @return true=看到匹配选项并完成确认；false=未能确认（调用方回退页面默认模型）
+     * 注意：Radix 弹层只认可信事件，JS dispatchEvent/click() 无效（实测 aria-expanded
+     * 不变）；键盘 Shift+Tab 路径在当前页面版本会飘到 <a> 链接上，同样不可用。
+     *
+     * @return true=选择器文本已变成目标模型；false=未能确认（调用方回退页面默认模型）
      */
     private suspend fun selectArenaModel(view: WebView, modelId: String): Boolean {
-        val focused = evaluate(view, """
-            (()=>{const t=[...document.querySelectorAll('textarea')]
-              .find(e=>/describe the image/i.test(e.getAttribute('placeholder')||''))
-              ||document.querySelector('textarea');
-              if(!t)return 'no'; t.focus(); return 'ok'})()
+        val tapPicker = evaluate(view, """
+            (()=>{const b=[...document.querySelectorAll('button[aria-haspopup="dialog"]')]
+              .find(b=>b.offsetParent!==null&&!b.getAttribute('aria-label')&&(b.innerText||'').trim());
+              if(!b)return null;
+              const r=b.getBoundingClientRect();
+              return JSON.stringify({x:r.x+r.width/2,y:r.y+r.height/2,cur:b.innerText.trim()})})()
         """.trimIndent())
-        if (focused != "ok") return false
-        delay(150)
-        repeat(2) {
-            sendArenaKey(view, KeyEvent.KEYCODE_TAB, KeyEvent.META_SHIFT_ON)
-            delay(120)
-        }
-        sendArenaKey(view, KeyEvent.KEYCODE_ENTER)
-        delay(400)
-        // execCommand 触发 React 受控组件的真实输入更新
-        evaluate(view, "document.execCommand('insertText', false, ${JSONObject.quote(modelId)}), 'ok'")
-        val optionDeadline = System.currentTimeMillis() + 5_000
-        var found = false
-        while (System.currentTimeMillis() < optionDeadline) {
+        if (tapPicker.isBlank() || tapPicker == "null") return false
+        val picker = JSONObject(tapPicker)
+        // 已经是目标模型就不用切
+        if (picker.optString("cur").contains(modelId, ignoreCase = true)) return true
+        if (!tapWebView(view, picker.optDouble("x"), picker.optDouble("y"))) return false
+
+        // 等搜索框并键入模型 id（React 受控组件需要原生 setter + input 事件）
+        val searchReadyDeadline = System.currentTimeMillis() + 8_000
+        var searchReady = false
+        while (System.currentTimeMillis() < searchReadyDeadline) {
             delay(250)
-            found = evaluate(view, """
-                (()=>{const o=[...document.querySelectorAll('[role="option"]')]
-                  .find(e=>(e.textContent||'').includes(${JSONObject.quote(modelId)}));
-                  return o?'yes':'no'})()
-            """.trimIndent()) == "yes"
-            if (found) break
+            searchReady = evaluate(view, """
+                (()=>{const s=[...document.querySelectorAll('input[placeholder="Search models"]')]
+                  .find(i=>i.offsetParent!==null);if(!s)return 'no';
+                  const setter=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value')?.set;
+                  if(setter)setter.call(s,${JSONObject.quote(modelId)});else s.value=${JSONObject.quote(modelId)};
+                  if(s._valueTracker)s._valueTracker.setValue('');
+                  s.dispatchEvent(new Event('input',{bubbles:true}));
+                  return 'ok'})()
+            """.trimIndent()) == "ok"
+            if (searchReady) break
         }
-        if (!found) {
-            // 没过滤出选项：Escape 关掉选择器，避免污染后续提示词输入
-            sendArenaKey(view, KeyEvent.KEYCODE_ESCAPE)
-            return false
+        if (!searchReady) return false
+
+        // 等匹配选项出现并可信点击
+        val optionDeadline = System.currentTimeMillis() + 6_000
+        while (System.currentTimeMillis() < optionDeadline) {
+            delay(300)
+            val opt = evaluate(view, """
+                (()=>{const b=[...document.querySelectorAll('button')]
+                  .find(b=>b.offsetParent!==null&&[...b.querySelectorAll('span')]
+                    .some(s=>((s.className||'').includes('font-mono'))&&(s.innerText||'').trim().toLowerCase()
+                      .includes(${JSONObject.quote(modelId.lowercase())})));
+                  if(!b)return null;
+                  const r=b.getBoundingClientRect();
+                  return JSON.stringify({x:r.x+r.width/2,y:r.y+r.height/2})})()
+            """.trimIndent())
+            if (!opt.isNullOrBlank() && opt != "null") {
+                val o = JSONObject(opt)
+                delay(200)
+                if (!tapWebView(view, o.optDouble("x"), o.optDouble("y"))) return false
+                delay(500)
+                // 确认选择器按钮文本已切换
+                return evaluate(view, """
+                    (()=>{const b=[...document.querySelectorAll('button[aria-haspopup="dialog"]')]
+                      .find(b=>b.offsetParent!==null&&!b.getAttribute('aria-label'));
+                      return b&&(b.innerText||'').toLowerCase()
+                        .includes(${JSONObject.quote(modelId.lowercase())})?'yes':'no'})()
+                """.trimIndent()) == "yes"
+            }
         }
-        delay(200)
-        sendArenaKey(view, KeyEvent.KEYCODE_ENTER)
-        delay(300)
-        return true
+        return false
     }
+
+    /**
+     * 向 WebView 指定 CSS 坐标派发真实触摸事件（down/up）。
+     * WebView 会把其转换成页面可见的可信 pointer/touch 事件链，
+     * Radix/React 弹层只认这种事件。坐标需乘 WebView 当前缩放。
+     */
+    private suspend fun tapWebView(view: WebView, cssX: Double, cssY: Double): Boolean =
+        withContext(Dispatchers.Main) {
+            runCatching {
+                val scale = view.scale
+                val x = (cssX * scale).toFloat()
+                val y = (cssY * scale).toFloat()
+                val now = android.os.SystemClock.uptimeMillis()
+                val down = android.view.MotionEvent.obtain(
+                    now, now, android.view.MotionEvent.ACTION_DOWN, x, y, 0
+                )
+                val up = android.view.MotionEvent.obtain(
+                    now, now + 60, android.view.MotionEvent.ACTION_UP, x, y, 0
+                )
+                view.dispatchTouchEvent(down)
+                view.dispatchTouchEvent(up)
+                down.recycle(); up.recycle()
+            }.isSuccess
+        }
 
     /** 向 WebView 派发系统级可信键盘事件（页面无法区分与真实按键）。 */
     private suspend fun sendArenaKey(view: WebView, keyCode: Int, metaState: Int = 0) =
