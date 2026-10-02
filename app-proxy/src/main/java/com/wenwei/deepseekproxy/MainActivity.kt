@@ -283,6 +283,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         WorkBuddyCredentialStore.attach(this)
         vm.ensureBailianLoaded()
+        vm.ensureAutoClawLoaded()
         android.util.Log.i("MainActivity", "=== onCreate called, app starting ===")
         setContent { App(vm) }
     }

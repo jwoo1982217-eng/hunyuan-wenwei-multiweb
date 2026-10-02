@@ -112,6 +112,21 @@ class ProxyViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /** AutoClaw token（接口页粘贴 JSON 含 access_token / refresh_token；重启恢复） */
+    fun applyAutoClawConfig(json: String) {
+        com.wenwei.deepseekproxy.proxy.AutoClawClient.applyConfig(json)
+        prefs.edit().putString("autoclaw_config", json).apply()
+        LogStore.i("AutoClaw", "凭证已配置（access=${json.length > 50}）")
+    }
+
+    fun ensureAutoClawLoaded() {
+        val saved = prefs.getString("autoclaw_config", "").orEmpty()
+        if (saved.isNotBlank() && !com.wenwei.deepseekproxy.proxy.AutoClawClient.isConfigured()) {
+            com.wenwei.deepseekproxy.proxy.AutoClawClient.applyConfig(saved)
+            LogStore.i("AutoClaw", "已恢复凭证")
+        }
+    }
+
     private val localGatewayTokenStore = LocalGatewayTokenStore(app)
     private val gatewayStartMutex = Mutex()
     // 本客户端只访问 127.0.0.1 本地网关，必须绕过系统代理：

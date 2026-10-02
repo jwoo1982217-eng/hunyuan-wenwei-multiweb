@@ -96,6 +96,7 @@ enum class WebProviderType(
     NANOAI_VIDEO("NanoAI 视频", null, emptyList()),
     BAILIAN("百炼", null, emptyList()),
     MINIMAX_H3("MiniMax H3 视频", null, emptyList()),
+    AUTOCLAW("AutoClaw 积分", null, emptyList()),
     ZHIPU_WEB(
         "智谱清言(登录)",
         "https://chatglm.cn/",
@@ -375,6 +376,31 @@ object ProviderCatalog {
             setOf(ProviderCapability.VIDEO_GENERATION),
             enabled = true,
             upstreamModelId = "minimax-h3",
+        ),
+        // AutoClaw（智谱 autoglm 桌面端）账号积分：4 模型，token 过期自动刷新
+        ProviderModel(
+            "autoclaw-glm-5.3-flash",
+            "AC GLM-5.3Flash",
+            WebProviderType.AUTOCLAW,
+            setOf(ProviderCapability.CHAT, ProviderCapability.STREAMING),
+            enabled = true,
+            upstreamModelId = "zai_glm-5.3-flash",
+        ),
+        ProviderModel(
+            "autoclaw-glm-5.3",
+            "AC GLM-5.3(Coding)",
+            WebProviderType.AUTOCLAW,
+            setOf(ProviderCapability.CHAT, ProviderCapability.STREAMING),
+            enabled = true,
+            upstreamModelId = "zaicoding_glm-5.3",
+        ),
+        ProviderModel(
+            "autoclaw-auto",
+            "AC Auto(DeepSeek)",
+            WebProviderType.AUTOCLAW,
+            setOf(ProviderCapability.CHAT, ProviderCapability.STREAMING),
+            enabled = true,
+            upstreamModelId = "zai_auto",
         )
     )
 

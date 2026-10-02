@@ -543,7 +543,75 @@ object ProxyServer {
                 handleQwenChat(registeredModel, req, completionId, created)
                 return
             }
-            // 百炼模型体验页匿名通道（额度绑 Cookie，浏览器页自动抓 bx 三件套）
+            // AutoClaw：OpenAI 兼容透传（X-Authorization + 双模型ID + system 闸门由客户端处理）
+            if (registeredModel.providerType == WebProviderType.AUTOCLAW) {
+                if (!AutoClawClient.isConfigured()) {
+                    call.respond(HttpStatusCode.ServiceUnavailable, mapOf(
+                        "error" to mapOf(
+                            "type" to "provider_unconfigured",
+                            "message" to "AutoClaw 未配置：请在「接口」页粘贴 token JSON"
+                        )
+                    ))
+                    return
+                }
+                // 转为纯文本 messages（AutoClaw 不支持多模态 content 数组）
+                val messages = org.json.JSONArray()
+                for (m in req.messages) {
+                    messages.put(org.json.JSONObject().apply {
+                        put("role", m.role)
+                        put("content", m.textContent())
+                    })
+                }
+                val bodyJson = org.json.JSONObject().apply {
+                    put("model", registeredModel.upstreamModelId)
+                    put("stream", req.stream)
+                    put("messages", messages)
+                    req.max_tokens?.let { put("max_tokens", it) }
+                }
+                LogStore.i("Proxy", "AutoClaw 聊天: ${registeredModel.upstreamModelId} msgs=${messages.length()}")
+                try {
+                    val started = System.nanoTime()
+                    val resp = AutoClawClient.chatCompletion(registeredModel.upstreamModelId, bodyJson)
+                    val text = resp.body?.string().orEmpty()
+                    resp.close()
+                    val latency = (System.nanoTime() - started) / 1_000_000
+                    if (!resp.isSuccessful) {
+                        call.respond(HttpStatusCode.BadGateway, mapOf("error" to mapOf(
+                            "type" to "autoclaw_upstream_error",
+                            "message" to "HTTP ${resp.code}: ${text.take(200)}"
+                        )))
+                        return
+                    }
+                    val j = runCatching { org.json.JSONObject(text) }.getOrNull()
+                    val content = j?.optJSONArray("choices")?.optJSONObject(0)
+                        ?.optJSONObject("message")?.optString("content").orEmpty()
+                    if (content.isBlank()) {
+                        call.respond(HttpStatusCode.BadGateway, mapOf("error" to mapOf(
+                            "type" to "autoclaw_empty",
+                            "message" to "上游返回空内容（可能 system 闸门拒绝）: ${text.take(150)}"
+                        )))
+                        return
+                    }
+                    LogStore.i("Proxy", "AutoClaw 完成 latency=${latency}ms len=${content.length}")
+                    // 非流式直接返回；流式用 respondProviderText 逐字重放
+                    respondProviderText(req, completionId, created) { emit ->
+                        if (req.stream) {
+                            for (i in content.indices step 24) {
+                                emit(content.substring(i, minOf(i + 24, content.length)))
+                            }
+                        } else {
+                            emit(content)
+                        }
+                    }
+                } catch (e: Exception) {
+                    LogStore.e("Proxy", "AutoClaw 异常: ${e.stackTraceToString()}")
+                    call.respond(HttpStatusCode.BadGateway, mapOf("error" to mapOf(
+                        "type" to "autoclaw_error",
+                        "message" to (e.message ?: e.toString()).take(250)
+                    )))
+                }
+                return
+            }
             if (registeredModel.providerType == WebProviderType.BAILIAN) {
                 handleBailianChat(registeredModel, req, completionId, created)
                 return
