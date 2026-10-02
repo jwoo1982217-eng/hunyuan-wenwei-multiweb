@@ -3056,10 +3056,13 @@ fun BrowserScreen(
                     // WebView builds do not fold that popup back into the opener, so
                     // the account is authenticated while the visible page stays on login.
                     settings.setSupportMultipleWindows(true)
-                    // 豆包例外：单窗口模式（window.open 在当前页内打开，对齐墨听D 的可用行为）——
-                    // 多窗口的"隐形弹窗转发"机制会干扰豆包登录（表现为登录页被弹出/弹丢）
+                    // 豆包例外：对齐墨听D AiWebRelayHost 的登录浏览器配置——
+                    // 单窗口 + 禁止 JS 自动开窗（window.open 被无视，页面不会被导航走）。
+                    // 此前"允许开窗+单窗口"的组合会让豆包登录后的 window.open 把当前页顶掉
+                    // （表现为登录完成瞬间被弹出）。
                     if (provider == WebProviderType.DOUBAO_WEB) {
                         settings.setSupportMultipleWindows(false)
+                        settings.javaScriptCanOpenWindowsAutomatically = false
                     }
                     // Automation must be able to focus the page editor even while the
                     // browser tab is covered by the relay screen.
@@ -3515,8 +3518,9 @@ fun BrowserScreen(
             update = {
                 it.isFocusable = true
                 it.isFocusableInTouchMode = true
-                // 切换供应商时同步窗口模式（豆包单窗口，其余多窗口）
+                // 切换供应商时同步窗口模式（豆包=墨听D 同款：单窗口+禁JS自动开窗，其余多窗口）
                 it.settings.setSupportMultipleWindows(provider != WebProviderType.DOUBAO_WEB)
+                it.settings.javaScriptCanOpenWindowsAutomatically = provider != WebProviderType.DOUBAO_WEB
             },
             onRelease = {
                 com.wenwei.deepseekproxy.proxy.CustomWebChatAutomation.detach(it)
