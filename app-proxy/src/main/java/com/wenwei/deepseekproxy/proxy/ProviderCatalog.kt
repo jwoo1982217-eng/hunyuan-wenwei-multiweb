@@ -95,6 +95,7 @@ enum class WebProviderType(
     APPBMS("AppBMS 生图", null, emptyList()),
     NANOAI_VIDEO("NanoAI 视频", null, emptyList()),
     BAILIAN("百炼", null, emptyList()),
+    MINIMAX_H3("MiniMax H3 视频", null, emptyList()),
     ZHIPU_WEB(
         "智谱清言(登录)",
         "https://chatglm.cn/",
@@ -364,6 +365,16 @@ object ProviderCatalog {
             setOf(ProviderCapability.CHAT, ProviderCapability.STREAMING),
             enabled = true,
             upstreamModelId = "qwen3.8-max",
+        ),
+        // MiniMax-H3 视频（siftq.com 匿名试用，伪造 XFF 身份轮换=额度无限刷新）
+        // 实测纯文字生成不跟提示词（出 showcase 模板片），定位为"照片动画器"（图生专用）
+        ProviderModel(
+            "minimax-h3-video",
+            "H3 照片动画",
+            WebProviderType.MINIMAX_H3,
+            setOf(ProviderCapability.VIDEO_GENERATION),
+            enabled = true,
+            upstreamModelId = "minimax-h3",
         )
     )
 

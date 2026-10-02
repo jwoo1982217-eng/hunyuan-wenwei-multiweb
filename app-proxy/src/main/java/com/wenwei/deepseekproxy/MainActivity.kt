@@ -1259,7 +1259,8 @@ fun ProxyScreen(
                     it.providerType == WebProviderType.CUSTOM_WEB ||
                         it.providerType == WebProviderType.OPENAI_COMPATIBLE ||
                         it.providerType == WebProviderType.DOUBAO_WEB ||
-                        it.providerType == WebProviderType.NANOAI_VIDEO
+                        it.providerType == WebProviderType.NANOAI_VIDEO ||
+                        it.providerType == WebProviderType.MINIMAX_H3
                 }
                 .distinctBy { it.publicModelId.lowercase() }
             // 视频 tab 复用生图模型源，显示时把「生图」替换为「视频」

@@ -1993,6 +1993,63 @@ object ProxyServer {
                 }
                 return
             }
+            if (registered.providerType == WebProviderType.MINIMAX_H3) {
+                val prompt = o.optString("prompt", "")
+                // 参考图（必需）：image_data[0].data / 顶层 image(URL 或 data URI)
+                val imageDataB64 = o.optJSONArray("image_data")?.optJSONObject(0)
+                    ?.optString("data", "").orEmpty()
+                val topLevelImage = listOf("image", "image_url")
+                    .firstNotNullOfOrNull { k -> o.optString(k, "").takeIf { it.isNotBlank() } }
+                val imageBytes: ByteArray? = when {
+                    imageDataB64.isNotBlank() -> runCatching {
+                        android.util.Base64.decode(imageDataB64, android.util.Base64.DEFAULT)
+                    }.getOrNull()
+                    topLevelImage != null && topLevelImage.startsWith("data:") -> runCatching {
+                        android.util.Base64.decode(topLevelImage.substringAfter("base64,"), android.util.Base64.DEFAULT)
+                    }.getOrNull()
+                    topLevelImage != null && topLevelImage.startsWith("http") ->
+                        MinimaxH3Client.fetchImageBytes(topLevelImage)
+                    else -> null
+                }
+                // 实测（2026-10-02）：上游文生不跟提示词（纯文字任务出 showcase 模板固定动作片，
+                // "小猫跳舞"出的是模板美女）——只有传图才有意义（照片+自然运镜动画）
+                if (imageBytes == null) {
+                    call.respond(HttpStatusCode.BadRequest, mapOf("error" to mapOf(
+                        "type" to "invalid_request",
+                        "message" to "H3 视频需要一张参考图（图生视频）：上游纯文字生成不跟随提示词，" +
+                            "只会返回展示模板的固定视频。请附一张照片（点附件按钮选图）"
+                    )))
+                    return
+                }
+                // 秒数：duration / seconds / video.seconds，归一到 6/10/15
+                val durationRaw = o.optInt("duration", 0).takeIf { it > 0 }
+                    ?: o.optInt("seconds", 0).takeIf { it > 0 }
+                    ?: o.optJSONObject("video")?.optInt("seconds", 0)?.takeIf { it > 0 }
+                    ?: 6
+                LogStore.i("VideoRoute", "H3视频 图生=${imageBytes != null} dur=${durationRaw}s prompt=${prompt.take(40)}")
+                try {
+                    val startedAt = System.nanoTime()
+                    val url = MinimaxH3Client.generateVideo(
+                        prompt, durationRaw, imageBytes,
+                        if (imageBytes != null && imageBytes.size > 2 &&
+                            imageBytes[0] == 0xFF.toByte() && imageBytes[1] == 0xD8.toByte()
+                        ) "jpg" else "png"
+                    )
+                    val latency = (System.nanoTime() - startedAt) / 1_000_000
+                    LogStore.i("VideoRoute", "H3视频完成 latency=${latency}ms")
+                    call.respond(ImageGenResponse(
+                        created = (System.currentTimeMillis() / 1000).toInt(),
+                        data = listOf(ImageDataItem(url))
+                    ))
+                } catch (e: Exception) {
+                    LogStore.e("VideoRoute", "H3视频异常: ${e.stackTraceToString()}")
+                    call.respond(HttpStatusCode.BadGateway, mapOf("error" to mapOf(
+                        "type" to "h3_video_error",
+                        "message" to (e.message ?: e.toString()).take(300)
+                    )))
+                }
+                return
+            }
             if (registered.providerType == WebProviderType.NANOAI_VIDEO) {
                 val prompt = o.optString("prompt", "")
                 if (prompt.isBlank()) {
