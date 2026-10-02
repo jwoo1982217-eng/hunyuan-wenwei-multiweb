@@ -3295,6 +3295,45 @@ fun BrowserScreen(
                             ) {
                                 com.wenwei.deepseekproxy.proxy.RaphaelWebImageAutomation.attach(view)
                             }
+                            // 豆包：页面自带的登录弹窗（手机号/二维码模态框）自动关闭。
+                            // 会话 Cookie 有效时聊天不受影响；弹窗只是页面引导，关掉即可。
+                            if (view != null && urlStr.orEmpty().contains("doubao.com", ignoreCase = true)
+                            ) {
+                                view.postDelayed({
+                                    view.evaluateJavascript(
+                                        """
+                                        (function closeDoubaoLoginModal(tries) {
+                                          // 常见关闭途径：关闭按钮(data-testid/class 含 close)、模态层、遮罩
+                                          var sels = [
+                                            '[data-testid*="close" i]', '[class*="close" i][aria-label]',
+                                            '[aria-label*="关闭"]', '[class*="modal"] [class*="close" i]',
+                                            '[class*="dialog"] [class*="close" i]'
+                                          ];
+                                          for (var i = 0; i < sels.length; i++) {
+                                            var els = document.querySelectorAll(sels[i]);
+                                            for (var j = 0; j < els.length; j++) {
+                                              var e = els[j];
+                                              var r = e.getBoundingClientRect();
+                                              if (r.width > 0 && r.height > 0) {
+                                                var inModal = e.closest('[class*="modal" i],[class*="dialog" i],[role="dialog"]') != null;
+                                                var txt = (e.textContent||'') + '';
+                                                if (inModal || /close|关闭|×/i.test(txt)) {
+                                                  e.click();
+                                                  return 'closed:' + sels[i];
+                                                }
+                                              }
+                                            }
+                                          }
+                                          // 没找到明确关闭钮：点遮罩（登录模态常可点背景关闭）
+                                          if (tries > 0) {
+                                            setTimeout(function(){ closeDoubaoLoginModal(tries-1); }, 500);
+                                          }
+                                          return '';
+                                        })(6);
+                                        """.trimIndent(), null
+                                    )
+                                }, 1200L)
+                            }
                             if (view != null && currentBrowserProvider == WebProviderType.CUSTOM_WEB) {
                                 currentActiveCustom?.takeIf {
                                     isCustomWebViewOnProviderPage(it, urlStr.orEmpty())
