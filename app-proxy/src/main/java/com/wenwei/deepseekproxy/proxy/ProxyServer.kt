@@ -542,6 +542,11 @@ object ProxyServer {
                 handleQwenChat(registeredModel, req, completionId, created)
                 return
             }
+            // 百炼模型体验页匿名通道（额度绑 Cookie，浏览器页自动抓 bx 三件套）
+            if (registeredModel.providerType == WebProviderType.BAILIAN) {
+                handleBailianChat(registeredModel, req, completionId, created)
+                return
+            }
             if (registeredModel.providerType == WebProviderType.ZHIPU_GUEST) {
                 handleZhipuChat(registeredModel, req, completionId, created)
                 return
@@ -790,13 +795,45 @@ object ProxyServer {
         }
     }
 
-    private suspend fun RoutingContext.handleQwenChat(
+    /** 百炼模型体验页匿名对话：messages 拼平铺 prompt → createSession → accessToken → SSE */
+    private suspend fun RoutingContext.handleBailianChat(
         model: ProviderModel,
         req: ChatCompletionRequest,
         completionId: String,
         created: Int,
     ) {
-        val cookie = nextAuthorization(WebProviderType.QWEN_WEB, qwenRotationIdx)
+        if (!BailianClient.isConfigured()) {
+            call.respond(HttpStatusCode.ServiceUnavailable, mapOf(
+                "error" to mapOf(
+                    "type" to "provider_unconfigured",
+                    "message" to "百炼未配置：请到「浏览器」页打开百炼体验页并发送一条消息，自动捕获凭证"
+                )
+            ))
+            return
+        }
+        val messagesJson = org.json.JSONArray().apply {
+            req.messages.forEach { m ->
+                put(org.json.JSONObject().apply {
+                    put("role", m.role)
+                    put("content", m.textContent())
+                })
+            }
+        }
+        respondProviderText(req, completionId, created) { emit ->
+            withContext(Dispatchers.IO) {
+                BailianClient.chatCompletion(messagesJson, model.upstreamModelId).use { response ->
+                    BailianClient.parseBailianSse(response.body!!.source(), onText = emit)
+                }
+            }
+        }
+    }
+
+    private suspend fun RoutingContext.handleQwenChat(
+        model: ProviderModel,
+        req: ChatCompletionRequest,
+        completionId: String,
+        created: Int,
+    ) {        val cookie = nextAuthorization(WebProviderType.QWEN_WEB, qwenRotationIdx)
         if (cookie.isBlank()) {
             call.respond(HttpStatusCode.ServiceUnavailable, mapOf(
                 "error" to "千问需要网页登录一次：请到浏览器选择“千问 Web”，登录后保存会话"
@@ -1937,6 +1974,83 @@ object ProxyServer {
                     call.respond(HttpStatusCode.BadGateway, mapOf("error" to mapOf(
                         "type" to "doubao_video_error",
                         "message" to (e.localizedMessage ?: e.toString()).take(200)
+                    )))
+                }
+                return
+            }
+            if (registered.providerType == WebProviderType.NANOAI_VIDEO) {
+                val prompt = o.optString("prompt", "")
+                if (prompt.isBlank()) {
+                    call.respond(HttpStatusCode.BadRequest, mapOf("error" to mapOf(
+                        "type" to "invalid_request", "message" to "prompt 不能为空"
+                    )))
+                    return
+                }
+                // 参考图（图生视频）：优先 image_data[0].data（base64，与豆包分支同格式），
+                // 兜底顶层 image / image_url（data URI 或 http(s) 直链）
+                val imageDataB64 = o.optJSONArray("image_data")?.optJSONObject(0)
+                    ?.optString("data", "").orEmpty()
+                val topLevelImage = listOf("image", "image_url")
+                    .firstNotNullOfOrNull { k -> o.optString(k, "").takeIf { it.isNotBlank() } }
+                val imageBytes: ByteArray? = when {
+                    imageDataB64.isNotBlank() -> runCatching {
+                        android.util.Base64.decode(imageDataB64, android.util.Base64.DEFAULT)
+                    }.getOrNull()
+                    topLevelImage != null && topLevelImage.startsWith("data:") -> runCatching {
+                        android.util.Base64.decode(topLevelImage.substringAfter("base64,"), android.util.Base64.DEFAULT)
+                    }.getOrNull()
+                    topLevelImage != null && topLevelImage.startsWith("http") ->
+                        NanoAiVideoClient.fetchImageBytes(topLevelImage)
+                    else -> null
+                }
+                val ext = when {
+                    imageBytes == null -> "png"
+                    imageBytes.size > 2 && imageBytes[0] == 0xFF.toByte() && imageBytes[1] == 0xD8.toByte() -> "jpg"
+                    else -> "png"
+                }
+                val ratio = NanoAiVideoClient.normalizeRatio(o)
+                // 模板（可选）：template = 模板名（style_name，如 "Baby Dance 1" / "Rain"）。
+                // 模板模式下：引擎以模板自带 model_type 为准；prompt 填模板键 video_prompt；
+                // image_prompt = 官方效果子键(+用户描述拼接，三者组合 2026-09-29 均实测通过)。
+                // 无模板：prompt = 用户描述，image_prompt 留空。
+                val templateName = o.optString("template", "").trim()
+                val tpl = if (templateName.isBlank()) null else NanoAiVideoClient.findTemplate(templateName)
+                if (!templateName.isBlank() && tpl == null) {
+                    call.respond(HttpStatusCode.BadRequest, mapOf("error" to mapOf(
+                        "type" to "invalid_request", "code" to "unknown_video_template",
+                        "message" to "未知模板: $templateName"
+                    )))
+                    return
+                }
+                var upstreamModelType = registered.upstreamModelId
+                var createPrompt = prompt
+                var createImagePrompt = ""
+                if (tpl != null) {
+                    upstreamModelType = tpl.modelType
+                    createPrompt = tpl.videoPrompt
+                    createImagePrompt = when {
+                        prompt.isBlank() -> tpl.imagePrompt
+                        tpl.imagePrompt.isBlank() -> prompt
+                        else -> "${tpl.imagePrompt}, $prompt"
+                    }
+                }
+                LogStore.i("VideoRoute", "NanoAI视频 model=$upstreamModelType template=${tpl?.styleName} ratio=$ratio 图生=${imageBytes != null} prompt=${createPrompt.take(40)} imagePrompt=${createImagePrompt.take(60)}")
+                try {
+                    val startedAt = System.nanoTime()
+                    val url = NanoAiVideoClient.generateVideo(
+                        createPrompt, ratio, upstreamModelType, imageBytes, ext, createImagePrompt
+                    )
+                    val latency = (System.nanoTime() - startedAt) / 1_000_000
+                    LogStore.i("VideoRoute", "NanoAI视频完成 url=$url latency=${latency}ms")
+                    call.respond(ImageGenResponse(
+                        created = (System.currentTimeMillis() / 1000).toInt(),
+                        data = listOf(ImageDataItem(url))
+                    ))
+                } catch (e: Exception) {
+                    LogStore.e("VideoRoute", "NanoAI视频异常: ${e.stackTraceToString()}")
+                    call.respond(HttpStatusCode.BadGateway, mapOf("error" to mapOf(
+                        "type" to "nanoai_video_error",
+                        "message" to (e.message ?: e.toString()).take(300)
                     )))
                 }
                 return

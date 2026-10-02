@@ -282,6 +282,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         WorkBuddyCredentialStore.attach(this)
+        vm.ensureBailianLoaded()
         android.util.Log.i("MainActivity", "=== onCreate called, app starting ===")
         setContent { App(vm) }
     }
@@ -393,6 +394,7 @@ fun App(vm: ProxyViewModel) {
                     onCustomProviderSaved = vm::saveCustomWebProvider,
                     onCustomProviderDeleted = vm::deleteCustomWebProvider,
                     onRelayReady = vm::ensureServerStarted,
+                    onBailianCaptured = { json -> vm.applyBailianConfig(json) },
                     modifier = Modifier.fillMaxSize()
                 )
                 if (tab == 0) {
@@ -436,7 +438,7 @@ fun App(vm: ProxyViewModel) {
                                 vm.generateImage(payload, attachments)
                                 input = ""
                             },
-                            onGenerateVideo = { payload, attachments, dur, res, rat, fps, aud, wmk ->
+                            onGenerateVideo = { payload, attachments, dur, res, rat, fps, aud, wmk, template ->
                                 vm.generateVideo(
                                     prompt = payload,
                                     attachmentUris = attachments,
@@ -445,7 +447,8 @@ fun App(vm: ProxyViewModel) {
                                     ratio = rat,
                                     fps = fps,
                                     audio = aud,
-                                    watermark = wmk
+                                    watermark = wmk,
+                                    template = template
                                 )
                                 input = ""
                             },
@@ -667,7 +670,7 @@ fun ProxyScreen(
     onSend: (String, List<Uri>) -> Unit,
     onRoundtable: (String, List<String>, List<Uri>) -> Unit,
     onGenerate: (String, List<Uri>) -> Unit,
-    onGenerateVideo: (String, List<Uri>, String, String, String, String, String, String) -> Unit = { payload, uris, _, _, _, _, _, _ -> onGenerate(payload, uris) },
+    onGenerateVideo: (String, List<Uri>, String, String, String, String, String, String, String?) -> Unit = { payload, uris, _, _, _, _, _, _, _ -> onGenerate(payload, uris) },
     modifier: Modifier = Modifier
 ) {
     android.util.Log.i("ProxyScreen", "=== ProxyScreen recomposing, model=$model, input=$input ===")
@@ -685,6 +688,8 @@ fun ProxyScreen(
     var videoFps by remember { mutableStateOf("Auto") }
     var videoAudio by remember { mutableStateOf("关") }
     var videoWatermark by remember { mutableStateOf("开") }
+    // NanoAI 玩法模板（style_name，null=不使用）；仅 NanoAI 模型在设置菜单里出现「模板」项
+    var videoTemplate by remember { mutableStateOf<String?>(null) }
     // 过滤「冗余纯别名」：buildPlainModelAliases 生成的 id 就是 upstream，
     // 若存在带接口前缀版本（X--upstream），纯别名只是兜底，UI 里隐藏避免成对。
     fun <T> dedupeProviderModels(models: List<T>): List<T> {
@@ -1253,7 +1258,8 @@ fun ProxyScreen(
                 .filter {
                     it.providerType == WebProviderType.CUSTOM_WEB ||
                         it.providerType == WebProviderType.OPENAI_COMPATIBLE ||
-                        it.providerType == WebProviderType.DOUBAO_WEB
+                        it.providerType == WebProviderType.DOUBAO_WEB ||
+                        it.providerType == WebProviderType.NANOAI_VIDEO
                 }
                 .distinctBy { it.publicModelId.lowercase() }
             // 视频 tab 复用生图模型源，显示时把「生图」替换为「视频」
@@ -1274,6 +1280,8 @@ fun ProxyScreen(
             var videoSettingsCat by remember { mutableStateOf<String?>(null) }
             var customParamDialog by remember { mutableStateOf<String?>(null) }
             var customParamText by remember { mutableStateOf("") }
+            // 当前选中的视频模型是否 NanoAI（是则在设置菜单里提供「模板」）
+            val isNanoAiVideo = videoModels.firstOrNull { it.publicModelId == videoModelFlow }?.providerType == WebProviderType.NANOAI_VIDEO
             Row(verticalAlignment = Alignment.CenterVertically) {
                 // 视频供应商框
                 ExposedDropdownMenuBox(
@@ -1412,8 +1420,12 @@ fun ProxyScreen(
                     }) {
                         // 第一级：参数名列表（点→进入二级）
                         if (videoSettingsCat == null) {
-                            listOf("时长", "清晰度", "比例", "帧数", "音效", "无水印").forEach { cat ->
+                            val settingCats = if (isNanoAiVideo)
+                                listOf("模板", "时长", "清晰度", "比例", "帧数", "音效", "无水印")
+                            else listOf("时长", "清晰度", "比例", "帧数", "音效", "无水印")
+                            settingCats.forEach { cat ->
                                 val current = when (cat) {
+                                    "模板" -> videoTemplate?.let { com.wenwei.deepseekproxy.proxy.NanoAiVideoClient.findTemplate(it)?.styleName } ?: "不使用"
                                     "时长" -> videoDuration; "清晰度" -> videoResolution; "比例" -> videoRatio
                                     "帧数" -> videoFps; "音效" -> videoAudio; else -> videoWatermark
                                 }
@@ -1425,6 +1437,43 @@ fun ProxyScreen(
                                     } },
                                     onClick = { videoSettingsCat = cat }
                                 )
+                            }
+                        } else if (videoSettingsCat == "模板") {
+                            // 模板二级列表：不使用 + 按类别分组的 27 个模板
+                            DropdownMenuItem(
+                                text = { Text("◂ 模板", color = MaterialTheme.colorScheme.onSurfaceVariant) },
+                                onClick = { videoSettingsCat = null }
+                            )
+                            DropdownMenuItem(
+                                text = { Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Text("不使用模板", color = if (videoTemplate == null) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface)
+                                    if (videoTemplate == null) Text(" ✓", color = MaterialTheme.colorScheme.primary)
+                                } },
+                                onClick = { videoTemplate = null; videoSettingsCat = null; videoSettingsExpanded = false }
+                            )
+                            com.wenwei.deepseekproxy.proxy.NanoAiVideoClient.TEMPLATES.groupBy { it.category }.forEach { (cat, items) ->
+                                DropdownMenuItem(
+                                    text = { Text(cat, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant) },
+                                    onClick = {},
+                                    enabled = false
+                                )
+                                items.forEach { tpl ->
+                                    val selected = videoTemplate == tpl.styleName
+                                    DropdownMenuItem(
+                                        text = { Row(verticalAlignment = Alignment.CenterVertically) {
+                                            Text(
+                                                tpl.styleName + if (tpl.modelType == "k_grok") "（可灵）" else "",
+                                                color = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
+                                            )
+                                            if (selected) Text(" ✓", color = MaterialTheme.colorScheme.primary)
+                                        } },
+                                        onClick = {
+                                            videoTemplate = tpl.styleName
+                                            videoSettingsCat = null
+                                            videoSettingsExpanded = false
+                                        }
+                                    )
+                                }
                             }
                         } else {
                             // 第二级：该参数的选项
@@ -1694,6 +1743,10 @@ fun ProxyScreen(
                     android.util.Log.i("SendButton", "准备调用回调: imageMode=$imageMode, videoMode=$videoMode, roundtableMode=$roundtableMode")
                     if (videoMode) {
                         android.util.Log.i("SendButton", "调用 onGenerateVideo")
+                        if (!videoTemplate.isNullOrBlank() && pendingAttachments.isEmpty()) {
+                            // 模板效果以照片为画面来源（图生视频），纯文字模板大概率无效
+                            Toast.makeText(context, "模板效果需要配一张真实照片（图生视频），纯文字可能无效果", Toast.LENGTH_LONG).show()
+                        }
                         onGenerateVideo(
                             payload,
                             pendingAttachments,
@@ -1702,7 +1755,8 @@ fun ProxyScreen(
                             videoRatio,
                             videoFps,
                             videoAudio,
-                            videoWatermark
+                            videoWatermark,
+                            videoTemplate
                         )
                     } else if (imageMode) {
                         android.util.Log.i("SendButton", "调用 onGenerate")
@@ -2396,6 +2450,7 @@ fun BrowserScreen(
     onCustomProviderSaved: (CustomWebProviderConfig) -> Unit,
     onCustomProviderDeleted: (String) -> Unit,
     onRelayReady: () -> Unit,
+    onBailianCaptured: (String) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -2748,6 +2803,12 @@ fun BrowserScreen(
             )
             Spacer(Modifier.width(8.dp))
             Button(onClick = { webViewRef.value?.loadUrl(url) }) { Text("前往") }
+            Spacer(Modifier.width(6.dp))
+            OutlinedButton(onClick = {
+                val u = "https://bailian.console.aliyun.com/cn-beijing/model/experience/llm"
+                url = u
+                webViewRef.value?.loadUrl(u)
+            }) { Text("百炼") }
             Spacer(Modifier.width(8.dp))
             if (provider == WebProviderType.RAPHAEL_WEB) {
                 Text("打开页面后即可通过 raphael-image-web 调用", modifier = Modifier.weight(2f))
@@ -3081,6 +3142,28 @@ fun BrowserScreen(
                                     it.key.equals("x-hif-leim", ignoreCase = true)
                                 }?.value?.takeIf(String::isNotBlank)?.let { fp ->
                                     capturedDeepSeekFingerprint.value = mapOf("x-hif-leim" to fp)
+                                }
+                            }
+                            // 百炼：页面自身 API 请求带 bx 反爬三件套，拦下即存（体验页发一条消息触发）
+                            if (host == "bailian-cs.console.aliyun.com") {
+                                val h = request?.requestHeaders
+                                fun hdr(name: String) = h?.entries?.firstOrNull {
+                                    it.key.equals(name, ignoreCase = true)
+                                }?.value
+                                val bxUa = hdr("bx-ua")
+                                val bxEt = hdr("bx_et")
+                                val bxUmid = hdr("bx-umidtoken")
+                                if (!bxUa.isNullOrBlank() && !bxEt.isNullOrBlank()) {
+                                    val cookie = android.webkit.CookieManager.getInstance()
+                                        .getCookie("https://bailian.console.aliyun.com").orEmpty()
+                                    val json = org.json.JSONObject().apply {
+                                        put("cookies", cookie)
+                                        put("bx_ua", bxUa)
+                                        put("bx_et", bxEt)
+                                        if (!bxUmid.isNullOrBlank()) put("bx_umidtoken", bxUmid)
+                                        put("model_id", "qwen3.8-max")
+                                    }
+                                    onBailianCaptured(json.toString())
                                 }
                             }
                             return super.shouldInterceptRequest(view, request)

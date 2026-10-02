@@ -93,6 +93,8 @@ enum class WebProviderType(
     ),
     OPENAI_COMPATIBLE("API 接口", null, emptyList()),
     APPBMS("AppBMS 生图", null, emptyList()),
+    NANOAI_VIDEO("NanoAI 视频", null, emptyList()),
+    BAILIAN("百炼", null, emptyList()),
     ZHIPU_WEB(
         "智谱清言(登录)",
         "https://chatglm.cn/",
@@ -339,7 +341,28 @@ object ProviderCatalog {
             enabled = true,
             upstreamModelId = m,
         )
-    }
+    } + NanoAiVideoClient.MODELS.map { m ->
+        // NanoAI 视频（k_grok=可灵 / v_fuse）：手机流量直连上游（上游经 CF 防护，
+        // 机房 IP 大概率 1010），无需登录。publicId 含 kling/t2v 词元供下游归类
+        ProviderModel(
+            m.publicId,
+            m.displayName,
+            WebProviderType.NANOAI_VIDEO,
+            setOf(ProviderCapability.VIDEO_GENERATION),
+            enabled = true,
+            upstreamModelId = m.upstreamModelType,
+        )
+    } + listOf(
+        // 百炼模型体验页匿名通道（额度绑浏览器 Cookie，「清空」后重新捕获即刷新）
+        ProviderModel(
+            "qwen3.8-max",
+            "百炼千问3.8-Max",
+            WebProviderType.BAILIAN,
+            setOf(ProviderCapability.CHAT, ProviderCapability.STREAMING),
+            enabled = true,
+            upstreamModelId = "qwen3.8-max",
+        )
+    )
 
     val enabledModels: List<ProviderModel> get() =
         (models.filter { it.enabled } + runtimeModels.filter { it.enabled })

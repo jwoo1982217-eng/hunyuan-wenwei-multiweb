@@ -88,6 +88,30 @@ val IMAGE_SIZE_OPTIONS = listOf(
 
 class ProxyViewModel(app: Application) : AndroidViewModel(app) {
     private val prefs = app.getSharedPreferences("ds_proxy", Context.MODE_PRIVATE)
+
+    /** 百炼凭证（浏览器抓包自动写入；重启后由 ensureBailianLoaded 恢复） */
+    @Volatile private var lastBailianJson: String = ""
+
+    fun applyBailianConfig(json: String) {
+        if (json == lastBailianJson) return
+        lastBailianJson = json
+        com.wenwei.deepseekproxy.proxy.BailianClient.applyConfig(json)
+        runCatching {
+            prefs.edit().putString("bailian_config", json).apply()
+        }
+        LogStore.i("Bailian", "百炼凭证已捕获并应用（cookies + bx 三件套）")
+    }
+
+    fun ensureBailianLoaded() {
+        if (lastBailianJson.isNotBlank()) return
+        val saved = prefs.getString("bailian_config", "").orEmpty()
+        if (saved.isNotBlank()) {
+            lastBailianJson = saved
+            com.wenwei.deepseekproxy.proxy.BailianClient.applyConfig(saved)
+            LogStore.i("Bailian", "已恢复百炼凭证")
+        }
+    }
+
     private val localGatewayTokenStore = LocalGatewayTokenStore(app)
     private val gatewayStartMutex = Mutex()
     // 本客户端只访问 127.0.0.1 本地网关，必须绕过系统代理：
@@ -953,7 +977,8 @@ class ProxyViewModel(app: Application) : AndroidViewModel(app) {
         ratio: String = "Auto",
         fps: String = "Auto",
         audio: String = "关",
-        watermark: String = "开"
+        watermark: String = "开",
+        template: String? = null
     ) {
         if (prompt.isBlank() && attachmentUris.isEmpty()) return
         chatInput.value = ""
@@ -987,6 +1012,8 @@ class ProxyViewModel(app: Application) : AndroidViewModel(app) {
             if (fps != "Auto" && fps.isNotBlank()) put("fps_str", fps)
             put("audio_pref", audio)
             put("watermark_pref", watermark)
+            // NanoAI 玩法模板（style_name）；模板模式下上游用模板效果，输入的 prompt 作为附加描述
+            if (!template.isNullOrBlank()) put("template", template)
 
             if (images.isNotEmpty()) {
                 val arr = JSONArray()
