@@ -563,7 +563,13 @@ class ProxyViewModel(app: Application) : AndroidViewModel(app) {
         prefs.edit().putInt("doubao_cookie_selected", selectedIndex.value).apply()
         ProxyServer.setCookieList(list)
     }
-    val chatModel = MutableStateFlow(prefs.getString("chat_model", "hy3-preview") ?: "hy3-preview")
+    val chatModel = MutableStateFlow(
+        // 默认不再用 hy3-preview（CNB 匿名通道已关）；存量保存值失效时兜底到智谱免登录
+        runCatching {
+            val saved = prefs.getString("chat_model", "qwen3.8-max") ?: "qwen3.8-max"
+            if (ProviderCatalog.find(saved) != null) saved else "zhipu-web"
+        }.getOrDefault("zhipu-web")
+    )
     val port = MutableStateFlow(prefs.getInt("port", 8800))
     val streamMode = MutableStateFlow(prefs.getBoolean("stream_mode", true))
     val serverRunning = LocalGatewayServiceLifecycle.running

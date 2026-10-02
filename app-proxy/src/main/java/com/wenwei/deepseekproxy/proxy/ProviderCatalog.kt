@@ -152,11 +152,14 @@ data class WebAccountProfile(
 object ProviderCatalog {
     @Volatile private var runtimeModels: List<ProviderModel> = emptyList()
     val models = listOf(
+        // CNB 混元3：上游已关闭匿名通道（2026-10-02 实测 401 NOT_LOGIN，
+        // 新旧会话全灭），暂时禁用；若做登录版（cnb.cool 账号 Cookie）再启用
         ProviderModel(
             CnbClient.DEFAULT_MODEL,
             "混元3",
             WebProviderType.CNB,
-            setOf(ProviderCapability.CHAT, ProviderCapability.STREAMING)
+            setOf(ProviderCapability.CHAT, ProviderCapability.STREAMING),
+            enabled = false
         ),
         ProviderModel(
             "doubao",
