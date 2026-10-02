@@ -2495,6 +2495,8 @@ fun BrowserScreen(
     var pendingGeminiValidationSessionId by remember { mutableStateOf<String?>(null) }
     // 「重置当前登录」时置位：下个该供应商页面加载完成后清 localStorage/sessionStorage
     var pendingStorageWipe by remember { mutableStateOf(false) }
+    // 会话列表折叠状态（默认收起，省浏览器页纵向空间）
+    var sessionsExpanded by remember { mutableStateOf(false) }
     val capturedAuthorization = remember { AtomicReference("") }
     // DeepSeek x-hif-leim 设备指纹（识图 completion 必需），onPageFinished 时从 localStorage 读取
     val capturedDeepSeekFingerprint = remember { mutableStateOf<Map<String, String>>(emptyMap()) }
@@ -2794,7 +2796,7 @@ fun BrowserScreen(
             }
         }
         Row(
-            Modifier.fillMaxWidth().padding(8.dp),
+            Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 2.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             OutlinedTextField(
@@ -2803,9 +2805,9 @@ fun BrowserScreen(
                 modifier = Modifier.weight(1f),
                 singleLine = true
             )
-            Spacer(Modifier.width(8.dp))
-            Button(onClick = { webViewRef.value?.loadUrl(url) }) { Text("前往") }
             Spacer(Modifier.width(6.dp))
+            Button(onClick = { webViewRef.value?.loadUrl(url) }) { Text("前往") }
+            Spacer(Modifier.width(4.dp))
             OutlinedButton(onClick = {
                 val u = "https://bailian.console.aliyun.com/cn-beijing/model/experience/llm"
                 url = u
@@ -2917,8 +2919,23 @@ fun BrowserScreen(
                 toast = "已清空 ${provider.displayName} Cookie，正在清本地存储…"
             }) { Text("重置当前登录") }
         }
+        // 会话列表：默认折叠成一行摘要，点开才展开（省纵向空间）
         val providerSessions = sessions.filter { it.providerType == provider }
         if (providerSessions.isNotEmpty()) {
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                TextButton(onClick = { sessionsExpanded = !sessionsExpanded }) {
+                    Text(
+                        (if (sessionsExpanded) "▾ " else "▸ ") +
+                            "已存会话 ${providerSessions.size} 个（${providerSessions.joinToString { it.displayName }}）",
+                        style = MaterialTheme.typography.bodySmall,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis
+                    )
+                }
+            }
+            if (sessionsExpanded) {
             LazyColumn(
                 modifier = Modifier.fillMaxWidth().heightIn(max = 120.dp),
                 contentPadding = PaddingValues(horizontal = 8.dp)
@@ -2991,6 +3008,7 @@ fun BrowserScreen(
                         TextButton(onClick = { onSessionDeleted(session.id) }) { Text("删除") }
                     }
                 }
+            }
             }
         }
         // WorkBuddy 网页登录授权（插件 token 流）入口与状态，自包含组件见 workbuddy/WorkBuddyStatusCard.kt
