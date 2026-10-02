@@ -3056,6 +3056,11 @@ fun BrowserScreen(
                     // WebView builds do not fold that popup back into the opener, so
                     // the account is authenticated while the visible page stays on login.
                     settings.setSupportMultipleWindows(true)
+                    // 豆包例外：单窗口模式（window.open 在当前页内打开，对齐墨听D 的可用行为）——
+                    // 多窗口的"隐形弹窗转发"机制会干扰豆包登录（表现为登录页被弹出/弹丢）
+                    if (provider == WebProviderType.DOUBAO_WEB) {
+                        settings.setSupportMultipleWindows(false)
+                    }
                     // Automation must be able to focus the page editor even while the
                     // browser tab is covered by the relay screen.
                     isFocusable = true
@@ -3512,6 +3517,8 @@ fun BrowserScreen(
             update = {
                 it.isFocusable = true
                 it.isFocusableInTouchMode = true
+                // 切换供应商时同步窗口模式（豆包单窗口，其余多窗口）
+                it.settings.setSupportMultipleWindows(provider != WebProviderType.DOUBAO_WEB)
             },
             onRelease = {
                 com.wenwei.deepseekproxy.proxy.CustomWebChatAutomation.detach(it)
