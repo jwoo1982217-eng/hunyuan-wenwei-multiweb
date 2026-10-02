@@ -3506,9 +3506,19 @@ fun BrowserScreen(
                         setAcceptCookie(true)
                         setAcceptThirdPartyCookies(wv, true)
                     }
-                    // 用户碰过 WebView 后不再自动关豆包登录弹窗（避免误杀主动登录）
-                    setOnTouchListener { _, _ ->
+                    // 用户碰过 WebView 后不再自动关豆包登录弹窗（避免误杀主动登录）；
+                    // 同时修复 Compose 焦点抢夺：触摸时若无焦点立即 requestFocus，
+                    // 否则豆包登录输入框点不动（键盘不弹、打不进字）
+                    setOnTouchListener { v, _ ->
                         userTouchedWebView = true
+                        if (!v.hasFocus()) {
+                            v.requestFocus()
+                            v.post {
+                                (context.getSystemService(Context.INPUT_METHOD_SERVICE)
+                                    as? android.view.inputmethod.InputMethodManager)
+                                    ?.showSoftInput(v, android.view.inputmethod.InputMethodManager.SHOW_IMPLICIT)
+                            }
+                        }
                         false
                     }
                     loadUrl(url)
