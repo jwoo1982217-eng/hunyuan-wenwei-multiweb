@@ -2493,6 +2493,8 @@ fun BrowserScreen(
     var compatibilityMode by remember { mutableStateOf(false) }
     var webViewGeneration by remember { mutableIntStateOf(0) }
     var pendingGeminiValidationSessionId by remember { mutableStateOf<String?>(null) }
+    // 「重置当前登录」时置位：下个该供应商页面加载完成后清 localStorage/sessionStorage
+    var pendingStorageWipe by remember { mutableStateOf(false) }
     val capturedAuthorization = remember { AtomicReference("") }
     // DeepSeek x-hif-leim 设备指纹（识图 completion 必需），onPageFinished 时从 localStorage 读取
     val capturedDeepSeekFingerprint = remember { mutableStateOf<Map<String, String>>(emptyMap()) }
@@ -2910,8 +2912,9 @@ fun BrowserScreen(
                 provider != WebProviderType.CUSTOM_WEB
             ) Button(onClick = {
                 clearProviderCookies(provider)
+                pendingStorageWipe = true   // 页面加载完再清 localStorage（Next.js 站点登录态存那里）
                 webViewRef.value?.loadUrl(url)
-                toast = "已只清空 ${provider.displayName} Cookie 并刷新"
+                toast = "已清空 ${provider.displayName} Cookie，正在清本地存储…"
             }) { Text("重置当前登录") }
         }
         val providerSessions = sessions.filter { it.providerType == provider }
@@ -2951,6 +2954,8 @@ fun BrowserScreen(
                                     }
                                 }
                             } else {
+                                // 先清后写：避免上一个账号的 Cookie 残留与本会话混串
+                                clearProviderCookies(provider)
                                 provider.cookieOrigins.forEach { origin ->
                                     session.cookieHeader.split(';').map { it.trim() }
                                         .filter { it.contains('=') }
@@ -3232,6 +3237,22 @@ fun BrowserScreen(
                         override fun onPageFinished(view: WebView?, urlStr: String?) {
                             progress = 0
                             CookieManager.getInstance().flush()
+                            // 「重置当前登录」请求的 localStorage 清空（cnb.cool 等站点登录态存 localStorage，
+                            // 只清 Cookie 无法登出）——页面就绪后清存储并刷新一次
+                            if (view != null && pendingStorageWipe) {
+                                val host = android.net.Uri.parse(urlStr.orEmpty()).host.orEmpty()
+                                val matchOrigin = provider.cookieOrigins.any { origin ->
+                                    host.isNotEmpty() && origin.contains(host, ignoreCase = true)
+                                }
+                                if (matchOrigin) {
+                                    pendingStorageWipe = false
+                                    view.evaluateJavascript(
+                                        "try{localStorage.clear();sessionStorage.clear();}catch(e){};true", null
+                                    )
+                                    toast = "已清空 ${provider.displayName} 的 Cookie 与本地存储"
+                                    view.postDelayed({ view.reload() }, 200L)
+                                }
+                            }
                             if (view != null && urlStr.orEmpty().contains("chatgpt.com", ignoreCase = true)
                             ) {
                                 com.wenwei.deepseekproxy.proxy.ChatGptWebAutomation.attach(view)
