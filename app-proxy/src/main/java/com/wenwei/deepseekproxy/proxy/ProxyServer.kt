@@ -206,6 +206,7 @@ object ProxyServer {
     private val zhipuWebRotationIdx = java.util.concurrent.atomic.AtomicInteger(0)
     private val deepSeekRotationIdx = java.util.concurrent.atomic.AtomicInteger(0)
     private val qwenRotationIdx = java.util.concurrent.atomic.AtomicInteger(0)
+    private val cnbRotationIdx = java.util.concurrent.atomic.AtomicInteger(0)
     private val deepSeekRequestMutex = Mutex()
 
     fun setWebSessions(sessions: List<SavedWebSession>) {
@@ -568,6 +569,20 @@ object ProxyServer {
             if (registeredModel.providerType == WebProviderType.CUSTOM_WEB) {
                 handleCustomWebChat(registeredModel, req, completionId, created)
                 return
+            }
+
+            // CNB 混元3：优先用浏览器保存的登录会话（多账号轮换）；
+            // 无会话则匿名直连兜底（手机网络路径下匿名仍可用），失败时由
+            // CnbClient 的错误提示引导去浏览器页登录
+            if (registeredModel.providerType == WebProviderType.CNB) {
+                val cnbCookie = nextAuthorization(WebProviderType.CNB, cnbRotationIdx)
+                if (cnbCookie.isBlank()) {
+                    CnbClient.sessionCookie = ""
+                    LogStore.i("Proxy", "CNB 无登录会话，走匿名通道（可在浏览器页登录后多号轮换）")
+                } else {
+                    CnbClient.sessionCookie = cnbCookie
+                    LogStore.i("Proxy", "CNB 登录会话已注入（${cnbCookie.length} 字符）")
+                }
             }
 
             val model = mapModel(registeredModel.upstreamModelId)

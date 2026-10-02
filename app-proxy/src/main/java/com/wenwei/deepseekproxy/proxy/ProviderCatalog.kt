@@ -11,7 +11,7 @@ enum class WebProviderType(
     val loginUrl: String?,
     val cookieOrigins: List<String>
 ) {
-    CNB("混元 / CNB", null, emptyList()),
+    CNB("混元 / CNB", "https://cnb.cool/", listOf("https://cnb.cool", "https://cnb.cool/")),
     DOUBAO_WEB(
         "豆包",
         "https://www.doubao.com/chat/",
@@ -152,14 +152,14 @@ data class WebAccountProfile(
 object ProviderCatalog {
     @Volatile private var runtimeModels: List<ProviderModel> = emptyList()
     val models = listOf(
-        // CNB 混元3：上游已关闭匿名通道（2026-10-02 实测 401 NOT_LOGIN，
-        // 新旧会话全灭），暂时禁用；若做登录版（cnb.cool 账号 Cookie）再启用
+        // CNB 混元3：匿名通道已关（401 NOT_LOGIN），改走浏览器登录会话（多号轮换）。
+        // 到「浏览器」页登录 cnb.cool 并保存会话后可用；支持保存多个账号自动轮换。
         ProviderModel(
             CnbClient.DEFAULT_MODEL,
             "混元3",
             WebProviderType.CNB,
             setOf(ProviderCapability.CHAT, ProviderCapability.STREAMING),
-            enabled = false
+            enabled = true
         ),
         ProviderModel(
             "doubao",

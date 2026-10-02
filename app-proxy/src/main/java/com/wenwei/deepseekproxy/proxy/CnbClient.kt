@@ -57,6 +57,22 @@ object CnbClient {
     private fun tokenFile() = File(storageDir, "cnb_token.json")
     private fun cookieFile() = File(storageDir, "cnb_cookie.json")
 
+    /**
+     * 登录会话 Cookie（浏览器页保存的 cnb.cool 登录态，多账号由 ProxyServer 轮换注入）。
+     * 非空时 explore/completions 都携带该登录 Cookie（并合并服务端新发的 csrfkey）。
+     * 匿名通道已关闭（401 NOT_LOGIN，2026-10-02 实测），登录态是唯一可行路径。
+     */
+    @Volatile var sessionCookie: String = ""
+
+    /** 登录 Cookie 与 csrfkey 合并成一行：登录 Cookie 原样保留，csrfkey 取当前最新值。 */
+    private fun effectiveCookie(): String {
+        if (sessionCookie.isBlank()) return "csrfkey=$csrfkey"
+        val rest = sessionCookie.split(";")
+            .map(String::trim)
+            .filter { it.isNotBlank() && !it.startsWith("csrfkey=", ignoreCase = true) }
+        return (rest + "csrfkey=$csrfkey").joinToString("; ")
+    }
+
     /** 从持久化文件恢复 csrfkey / csrftoken（storageDir 设置后调用，仅执行一次）。 */
     fun loadPersisted() {
         if (restored) return
@@ -104,11 +120,15 @@ object CnbClient {
     }
 
     private fun fetchAuth() {
-        LogStore.d("CNB", "获取认证: GET $EXPLORE")
+        LogStore.d("CNB", "获取认证: GET $EXPLORE${if (sessionCookie.isNotBlank()) "（登录会话）" else ""}")
         val reqBuilder = Request.Builder().url(EXPLORE)
             .header("User-Agent", UA)
             .header("Accept", "text/html,*/*")
-        if (csrfkey.isNotBlank()) reqBuilder.header("Cookie", "csrfkey=$csrfkey")
+        if (sessionCookie.isNotBlank()) {
+            reqBuilder.header("Cookie", effectiveCookie())
+        } else if (csrfkey.isNotBlank()) {
+            reqBuilder.header("Cookie", "csrfkey=$csrfkey")
+        }
         client.newCall(reqBuilder.build()).execute().use { resp ->
             // csrfkey 来自 Set-Cookie 响应头（页面不回显）
             val setCookie = resp.headers("set-cookie").joinToString("; ")
@@ -164,7 +184,7 @@ object CnbClient {
             .header("User-Agent", UA)
             .header("Origin", BASE)
             .header("Referer", "$BASE/explore")
-            .header("Cookie", "csrfkey=$csrfkey")
+            .header("Cookie", effectiveCookie())
             .header("Csrftoken", csrftoken)
             .build()
         val resp = client.newCall(req).execute()
@@ -199,7 +219,10 @@ object CnbClient {
 
     /** 清空凭证并强制刷新后重试一次；已重试过则直接抛错。 */
     private fun refreshAndRetry(rawBody: String, model: String, retry: Boolean, reason: String): Response {
-        if (!retry) throw RuntimeException("CNB $reason，刷新凭证重试后仍失败")
+        if (!retry) throw RuntimeException(
+            if (sessionCookie.isBlank()) "CNB $reason，刷新凭证重试后仍失败"
+            else "CNB 会话鉴权失败（$reason）：该登录会话可能已过期，请到浏览器页重新登录保存"
+        )
         LogStore.w("CNB", "$reason，刷新凭证后重试")
         csrftoken = ""
         try {
