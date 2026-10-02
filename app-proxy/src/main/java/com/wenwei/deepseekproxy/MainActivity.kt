@@ -2497,6 +2497,8 @@ fun BrowserScreen(
     var pendingStorageWipe by remember { mutableStateOf(false) }
     // 会话列表折叠状态（默认收起，省浏览器页纵向空间）
     var sessionsExpanded by remember { mutableStateOf(false) }
+    // 用户是否碰过 WebView（碰过就不自动关豆包引导弹窗；页面开始加载时重置）
+    var userTouchedWebView by remember { mutableStateOf(false) }
     val capturedAuthorization = remember { AtomicReference("") }
     // DeepSeek x-hif-leim 设备指纹（识图 completion 必需），onPageFinished 时从 localStorage 读取
     val capturedDeepSeekFingerprint = remember { mutableStateOf<Map<String, String>>(emptyMap()) }
@@ -3221,6 +3223,7 @@ fun BrowserScreen(
                             favicon: android.graphics.Bitmap?
                         ) {
                             urlStr?.let { url = it }
+                            userTouchedWebView = false   // 新页面加载，重置触摸标记
                             if (view != null) {
                                 if (currentBrowserProvider == WebProviderType.CUSTOM_WEB &&
                                     currentActiveCustom?.let {
@@ -3296,8 +3299,12 @@ fun BrowserScreen(
                                 com.wenwei.deepseekproxy.proxy.RaphaelWebImageAutomation.attach(view)
                             }
                             // 豆包：页面自带的登录弹窗（手机号/二维码模态框）自动关闭。
-                            // 会话 Cookie 有效时聊天不受影响；弹窗只是页面引导，关掉即可。
-                            if (view != null && urlStr.orEmpty().contains("doubao.com", ignoreCase = true)
+                            // 三重保护避免误杀主动登录：① 用户碰过屏幕不关 ② 登录/ passport 页豁免
+                            // ③ 只在页面加载后 1.2s 尝试（晚出的弹窗不动）
+                            if (view != null && !userTouchedWebView &&
+                                urlStr.orEmpty().contains("doubao.com", ignoreCase = true) &&
+                                !urlStr.orEmpty().contains("login", ignoreCase = true) &&
+                                !urlStr.orEmpty().contains("passport", ignoreCase = true)
                             ) {
                                 view.postDelayed({
                                     view.evaluateJavascript(
@@ -3492,6 +3499,11 @@ fun BrowserScreen(
                     CookieManager.getInstance().apply {
                         setAcceptCookie(true)
                         setAcceptThirdPartyCookies(wv, true)
+                    }
+                    // 用户碰过 WebView 后不再自动关豆包登录弹窗（避免误杀主动登录）
+                    setOnTouchListener { _, _ ->
+                        userTouchedWebView = true
+                        false
                     }
                     loadUrl(url)
                 }.also { webViewRef.value = it }
