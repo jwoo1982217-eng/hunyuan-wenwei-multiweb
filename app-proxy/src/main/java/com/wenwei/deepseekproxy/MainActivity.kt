@@ -3306,47 +3306,10 @@ fun BrowserScreen(
                             ) {
                                 com.wenwei.deepseekproxy.proxy.RaphaelWebImageAutomation.attach(view)
                             }
-                            // 豆包：已登录时自动关闭页面自带的登录引导弹窗（纯打扰）。
-                            // 关键门槛：Cookie 里已有 sessionid（=已登录）才动手；未登录时绝不碰——
-                            // 那个弹窗正是登录入口（手机号/二维码都在里面），此前误关导致"登录被弹出"。
-                            // 触摸标记仅作辅助；不再重试、延迟拉长到 2s 降低误伤面。
-                            if (view != null && !userTouchedWebView &&
-                                urlStr.orEmpty().contains("doubao.com", ignoreCase = true) &&
-                                !urlStr.orEmpty().contains("login", ignoreCase = true) &&
-                                !urlStr.orEmpty().contains("passport", ignoreCase = true) &&
-                                CookieManager.getInstance().getCookie("https://www.doubao.com")
-                                    ?.contains("sessionid") == true
-                            ) {
-                                view.postDelayed({
-                                    view.evaluateJavascript(
-                                        """
-                                        (function closeDoubaoLoginModal() {
-                                          var sels = [
-                                            '[data-testid*="close" i]', '[class*="close" i][aria-label]',
-                                            '[aria-label*="关闭"]', '[class*="modal"] [class*="close" i]',
-                                            '[class*="dialog"] [class*="close" i]'
-                                          ];
-                                          for (var i = 0; i < sels.length; i++) {
-                                            var els = document.querySelectorAll(sels[i]);
-                                            for (var j = 0; j < els.length; j++) {
-                                              var e = els[j];
-                                              var r = e.getBoundingClientRect();
-                                              if (r.width > 0 && r.height > 0) {
-                                                var inModal = e.closest('[class*="modal" i],[class*="dialog" i],[role="dialog"]') != null;
-                                                var txt = (e.textContent||'') + '';
-                                                if (inModal || /close|关闭|×/i.test(txt)) {
-                                                  e.click();
-                                                  return 'closed:' + sels[i];
-                                                }
-                                              }
-                                            }
-                                          }
-                                          return '';
-                                        })();
-                                        """.trimIndent(), null
-                                    )
-                                }, 2000L)
-                            }
+                            // 豆包：不做任何弹窗自动操作。此前"已登录才关引导弹窗"的脚本
+                            // 会在登录成功后的页面上误点非关闭元素，触发豆包安全拦截
+                            // （页面弹出"非法请求"并踢出登录态）。教训：豆包页面结构复杂，
+                            // 通用 close 选择器误伤面不可控——引导弹窗交给用户手动关。
                             if (view != null && currentBrowserProvider == WebProviderType.CUSTOM_WEB) {
                                 currentActiveCustom?.takeIf {
                                     isCustomWebViewOnProviderPage(it, urlStr.orEmpty())
