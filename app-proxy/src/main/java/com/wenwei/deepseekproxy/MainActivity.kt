@@ -466,6 +466,8 @@ fun App(vm: ProxyViewModel) {
                             onTest = { vm.testApiProvider(it) },
                             onSync = { vm.testApiProvider(it, syncModels = true) },
                             onSpeedTestAll = vm::testAllApiProviders,
+                            onAutoClawSendCode = { phone, cb -> vm.sendAutoClawCode(phone, cb) },
+                            onAutoClawLogin = { phone, code, cb -> vm.loginAutoClaw(phone, code, cb) },
                             modifier = Modifier.fillMaxSize()
                         )
                     }
@@ -493,10 +495,13 @@ fun ApiProviderScreen(
     onTest: (ApiProviderConfig) -> Unit,
     onSync: (ApiProviderConfig) -> Unit,
     onSpeedTestAll: () -> Unit,
+    onAutoClawSendCode: (String, (String?) -> Unit) -> Unit = { _, _ -> },
+    onAutoClawLogin: (String, String, (Result<com.wenwei.deepseekproxy.proxy.AutoClawClient.LoginResult>) -> Unit) -> Unit = { _, _, _ -> },
     modifier: Modifier = Modifier
 ) {
     var editing by remember { mutableStateOf<ApiProviderConfig?>(null) }
     var creating by remember { mutableStateOf(false) }
+    var showAutoClawLogin by remember { mutableStateOf(false) }
 
     Column(modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
@@ -507,6 +512,7 @@ fun ApiProviderScreen(
             TextButton(onClick = onSpeedTestAll) { Text("全部测速") }
             Button(onClick = { creating = true }) { Text("＋ 添加") }
         }
+        AutoClawLoginCard(onOpenLogin = { showAutoClawLogin = true })
         if (providers.isEmpty()) {
             ElevatedCard(Modifier.fillMaxWidth()) {
                 Text("还没有自定义接口。点击“添加”，填写接口地址和 API Key，应用会自动发现模型。", Modifier.padding(16.dp))
@@ -547,6 +553,131 @@ fun ApiProviderScreen(
             }
         )
     }
+
+    if (showAutoClawLogin) {
+        AutoClawLoginDialog(
+            onDismiss = { showAutoClawLogin = false },
+            onSendCode = onAutoClawSendCode,
+            onLogin = onAutoClawLogin
+        )
+    }
+}
+
+/** AutoClaw（智谱积分）登录状态卡片：显示当前登录态，点按钮进验证码登录 */
+@Composable
+private fun AutoClawLoginCard(onOpenLogin: () -> Unit) {
+    var configured by remember { mutableStateOf(com.wenwei.deepseekproxy.proxy.AutoClawClient.isConfigured()) }
+    // 从对话框回来时刷新状态（简单轮询对话关闭即可——由 Dialog 内部登录成功后触发）
+    LaunchedEffect(Unit) {
+        while (true) {
+            configured = com.wenwei.deepseekproxy.proxy.AutoClawClient.isConfigured()
+            kotlinx.coroutines.delay(2000)
+        }
+    }
+    ElevatedCard(Modifier.fillMaxWidth()) {
+        Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text("AutoClaw 积分（智谱账号）", style = MaterialTheme.typography.titleMedium)
+                Text(
+                    if (configured) "已登录 · 手机上自动续期，聊天走「AC」前缀模型"
+                    else "未登录 · 用手机号验证码登录，积分变聊天模型",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (configured) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error
+                )
+            }
+            Button(onClick = onOpenLogin) { Text(if (configured) "换号/重登" else "登录") }
+        }
+    }
+}
+
+/** AutoClaw 手机验证码登录对话框 */
+@Composable
+private fun AutoClawLoginDialog(
+    onDismiss: () -> Unit,
+    onSendCode: (String, (String?) -> Unit) -> Unit,
+    onLogin: (String, String, (Result<com.wenwei.deepseekproxy.proxy.AutoClawClient.LoginResult>) -> Unit) -> Unit
+) {
+    var phone by remember { mutableStateOf("") }
+    var code by remember { mutableStateOf("") }
+    var msg by remember { mutableStateOf<String?>(null) }
+    var sending by remember { mutableStateOf(false) }
+    var loggingIn by remember { mutableStateOf(false) }
+    var countdown by remember { mutableStateOf(0) }
+    var successInfo by remember { mutableStateOf<String?>(null) }
+
+    LaunchedEffect(countdown) {
+        if (countdown > 0) {
+            kotlinx.coroutines.delay(1000)
+            countdown--
+        }
+    }
+
+    AlertDialog(
+        onDismissRequest = { if (!sending && !loggingIn) onDismiss() },
+        title = { Text("AutoClaw 手机验证码登录") },
+        text = {
+            Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedTextField(
+                    phone, { phone = it.filter { c -> c.isDigit() }.take(11) },
+                    label = { Text("手机号") }, singleLine = true,
+                    enabled = !loggingIn && successInfo == null, modifier = Modifier.fillMaxWidth()
+                )
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(
+                        code, { code = it.filter { c -> c.isDigit() }.take(6) },
+                        label = { Text("验证码") }, singleLine = true,
+                        enabled = !loggingIn && successInfo == null,
+                        modifier = Modifier.weight(1f)
+                    )
+                    TextButton(
+                        enabled = phone.length == 11 && countdown == 0 && !sending && !loggingIn && successInfo == null,
+                        onClick = {
+                            sending = true; msg = null
+                            onSendCode(phone) { err ->
+                                sending = false
+                                if (err == null) { countdown = 60; msg = "验证码已发送，请查收短信" }
+                                else msg = err
+                            }
+                        }
+                    ) { Text(if (countdown > 0) "${countdown}s" else if (sending) "发送中…" else "获取验证码") }
+                }
+                msg?.let {
+                    Text(it, style = MaterialTheme.typography.bodySmall,
+                        color = if (it.contains("已发送")) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error)
+                }
+                successInfo?.let {
+                    Text(it, color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.bodyMedium)
+                }
+                Text(
+                    "登录后积分余额变成本机 3 个「AC」聊天模型；token 在手机上自动续期。" +
+                        "若发送/登录失败，请先关闭手机 VPN 再试。",
+                    style = MaterialTheme.typography.bodySmall
+                )
+            }
+        },
+        confirmButton = {
+            if (successInfo == null) {
+                TextButton(
+                    enabled = phone.length == 11 && code.length >= 4 && !loggingIn && !sending,
+                    onClick = {
+                        loggingIn = true; msg = null
+                        onLogin(phone, code) { result ->
+                            loggingIn = false
+                            result.onSuccess { r ->
+                                successInfo = "登录成功！积分余额：${r.balance ?: "已获取"}"
+                            }
+                            result.onFailure { e -> msg = e.message ?: "登录失败" }
+                        }
+                    }
+                ) { Text(if (loggingIn) "登录中…" else "登录") }
+            } else {
+                TextButton(onClick = onDismiss) { Text("完成") }
+            }
+        },
+        dismissButton = {
+            TextButton(enabled = !sending && !loggingIn, onClick = onDismiss) { Text("关闭") }
+        }
+    )
 }
 
 @Composable

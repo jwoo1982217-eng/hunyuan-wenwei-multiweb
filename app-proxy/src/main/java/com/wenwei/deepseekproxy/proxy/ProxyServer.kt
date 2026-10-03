@@ -572,35 +572,43 @@ object ProxyServer {
                 try {
                     val started = System.nanoTime()
                     val resp = AutoClawClient.chatCompletion(registeredModel.upstreamModelId, bodyJson)
-                    val text = resp.body?.string().orEmpty()
+                    // 上游强制流式（SSE），无论客户端请求 stream 与否都要解析 SSE 拼接全文
+                    val sseText = resp.body?.string().orEmpty()
                     resp.close()
                     val latency = (System.nanoTime() - started) / 1_000_000
                     if (!resp.isSuccessful) {
                         call.respond(HttpStatusCode.BadGateway, mapOf("error" to mapOf(
                             "type" to "autoclaw_upstream_error",
-                            "message" to "HTTP ${resp.code}: ${text.take(200)}"
+                            "message" to "HTTP ${resp.code}: ${sseText.take(200)}"
                         )))
                         return
                     }
-                    val j = runCatching { org.json.JSONObject(text) }.getOrNull()
-                    val content = j?.optJSONArray("choices")?.optJSONObject(0)
-                        ?.optJSONObject("message")?.optString("content").orEmpty()
+                    // 解析 SSE：取 delta.content 拼接（跳过 reasoning_content 思考链）
+                    val content = StringBuilder()
+                    for (line in sseText.lines()) {
+                        val l = line.trim()
+                        if (!l.startsWith("data:")) continue
+                        val payload = l.removePrefix("data:").trim()
+                        if (payload.isEmpty() || payload == "[DONE]") continue
+                        val j = runCatching { org.json.JSONObject(payload) }.getOrNull() ?: continue
+                        val delta = j.optJSONArray("choices")?.optJSONObject(0)?.optJSONObject("delta") ?: continue
+                        delta.optString("content", "").let { if (it.isNotEmpty()) content.append(it) }
+                    }
                     if (content.isBlank()) {
                         call.respond(HttpStatusCode.BadGateway, mapOf("error" to mapOf(
                             "type" to "autoclaw_empty",
-                            "message" to "上游返回空内容（可能 system 闸门拒绝）: ${text.take(150)}"
+                            "message" to "SSE 解析为空: ${sseText.take(150)}"
                         )))
                         return
                     }
                     LogStore.i("Proxy", "AutoClaw 完成 latency=${latency}ms len=${content.length}")
-                    // 非流式直接返回；流式用 respondProviderText 逐字重放
                     respondProviderText(req, completionId, created) { emit ->
                         if (req.stream) {
-                            for (i in content.indices step 24) {
+                            for (i in 0 until content.length step 24) {
                                 emit(content.substring(i, minOf(i + 24, content.length)))
                             }
                         } else {
-                            emit(content)
+                            emit(content.toString())
                         }
                     }
                 } catch (e: Exception) {

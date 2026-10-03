@@ -127,6 +127,26 @@ class ProxyViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /** AutoClaw 手机验证码登录（接口页）。UI 回调约定：sendCode 成功返回 null。 */
+    fun sendAutoClawCode(phone: String, onDone: (String?) -> Unit) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val err = com.wenwei.deepseekproxy.proxy.AutoClawClient.sendCode(phone)
+            onDone(err)
+        }
+    }
+
+    fun loginAutoClaw(
+        phone: String,
+        code: String,
+        onDone: (Result<com.wenwei.deepseekproxy.proxy.AutoClawClient.LoginResult>) -> Unit
+    ) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val r = com.wenwei.deepseekproxy.proxy.AutoClawClient.loginWithCode(phone, code)
+            if (r.isSuccess) applyAutoClawConfig(com.wenwei.deepseekproxy.proxy.AutoClawClient.configJson())
+            onDone(r)
+        }
+    }
+
     private val localGatewayTokenStore = LocalGatewayTokenStore(app)
     private val gatewayStartMutex = Mutex()
     // 本客户端只访问 127.0.0.1 本地网关，必须绕过系统代理：
