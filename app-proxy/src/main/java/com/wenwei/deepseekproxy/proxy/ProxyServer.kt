@@ -554,24 +554,13 @@ object ProxyServer {
                     ))
                     return
                 }
-                // 转为纯文本 messages（AutoClaw 不支持多模态 content 数组）
-                val messages = org.json.JSONArray()
-                for (m in req.messages) {
-                    messages.put(org.json.JSONObject().apply {
-                        put("role", m.role)
-                        put("content", m.textContent())
-                    })
-                }
-                val bodyJson = org.json.JSONObject().apply {
-                    put("model", registeredModel.upstreamModelId)
-                    put("stream", req.stream)
-                    put("messages", messages)
-                    req.max_tokens?.let { put("max_tokens", it) }
-                }
-                LogStore.i("Proxy", "AutoClaw 聊天: ${registeredModel.upstreamModelId} msgs=${messages.length()}")
+                // 转为纯文本 role→content 对（AutoClaw 不支持多模态 content 数组；
+                // 用纯 Kotlin 数据传递，规避 org.json 跨对象共享丢消息的诡异行为）
+                val msgPairs = req.messages.map { it.role to it.textContent() }
+                LogStore.i("Proxy", "AutoClaw 聊天: ${registeredModel.upstreamModelId} msgs=${msgPairs.size}")
                 try {
                     val started = System.nanoTime()
-                    val resp = AutoClawClient.chatCompletion(registeredModel.upstreamModelId, bodyJson)
+                    val resp = AutoClawClient.chatCompletion(registeredModel.upstreamModelId, msgPairs, req.max_tokens)
                     // 上游强制流式（SSE），无论客户端请求 stream 与否都要解析 SSE 拼接全文
                     val sseText = resp.body?.string().orEmpty()
                     resp.close()

@@ -65,6 +65,9 @@ object AutoClawClient {
     private val client = OkHttpClient.Builder()
         .connectTimeout(20, TimeUnit.SECONDS)
         .readTimeout(300, TimeUnit.SECONDS)  // 深度思考可能很长
+        // 强制 HTTP/1.1：上游对 OkHttp 协商的 HTTP/2 多路复用会话处理不稳
+        // （2026-10-03 手机端 500 parse response failed 排查；curl h1/h2 均通，仅 OkHttp 失败）
+        .protocols(listOf(okhttp3.Protocol.HTTP_1_1))
         .build()
 
     fun isConfigured(): Boolean = accessToken.isNotBlank()
@@ -175,37 +178,39 @@ object AutoClawClient {
     }
 
     /**
-     * 聊天（OpenAI 兼容透传）。返回上游 Response（调用方负责关闭）。
+     * 聊天（OpenAI 兼容）。入参用纯 Kotlin 数据（role→content 列表）。
      * messages 会做 system 前缀注入（上游闸门要求）。
+     *
+     * ⚠️ 历史坑（2026-10-03）：org.json 的 JSONArray.put(0, x) 是**替换**不是前插
+     * （JS 的 unshift 才是前插），曾把用户消息原地覆盖成 system 消息 → 上游 500
+     * parse response failed。所以这里按顺序构建：无 system 时先放身份句再放消息。
      */
-    fun chatCompletion(routeId: String, openAiBody: JSONObject): okhttp3.Response {
+    fun chatCompletion(routeId: String, msgs: List<Pair<String, String>>, maxTokens: Int? = null): okhttp3.Response {
         if (!isConfigured()) {
-            throw IllegalStateException("AutoClaw 未配置：请在「接口」页粘贴 token JSON（含 access_token / refresh_token）")
+            throw IllegalStateException("AutoClaw 未配置：请在「接口」页登录或粘贴 token JSON")
         }
         val bodyModel = MODEL_ROUTES[routeId] ?: routeId.removePrefix("zaicoding_").removePrefix("zai_")
-        val messages = openAiBody.optJSONArray("messages") ?: org.json.JSONArray()
-        // system 前缀注入：首条 system 前插入身份句（上游闸门）
         val normalized = org.json.JSONArray()
-        var systemDone = false
-        for (i in 0 until messages.length()) {
-            val m = messages.optJSONObject(i) ?: continue
-            if (!systemDone && m.optString("role") in setOf("system", "developer")) {
-                normalized.put(JSONObject().apply {
-                    put("role", m.optString("role"))
-                    put("content", IDENTITY_PREFIX + m.optString("content"))
-                })
-                systemDone = true
-            } else {
-                normalized.put(m)
-            }
+        val systemRoles = setOf("system", "developer")
+        var injected = false
+        if (msgs.none { it.first in systemRoles }) {
+            normalized.put(JSONObject().apply { put("role", "system"); put("content", IDENTITY_PREFIX) })
+            injected = true
         }
-        if (!systemDone) {
-            normalized.put(0, JSONObject().apply { put("role", "system"); put("content", IDENTITY_PREFIX) })
+        for ((role, content) in msgs) {
+            val isSystem = role in systemRoles
+            normalized.put(JSONObject().apply {
+                put("role", role)
+                put("content", if (isSystem && !injected) IDENTITY_PREFIX + content else content)
+            })
+            if (isSystem) injected = true
         }
-        openAiBody.put("model", bodyModel)
-        openAiBody.put("messages", normalized)
-        openAiBody.put("stream", true)  // 上游只支持流式（非流式 → 500 parse response failed）
-
+        val openAiBody = JSONObject().apply {
+            put("model", bodyModel)
+            put("messages", normalized)
+            put("stream", true)  // 上游只支持流式（非流式 → 500 parse response failed）
+            maxTokens?.let { put("max_tokens", it) }
+        }
         val req = Request.Builder().url(CHAT)
             .post(openAiBody.toString().toRequestBody("application/json".toMediaType()))
             .apply {
