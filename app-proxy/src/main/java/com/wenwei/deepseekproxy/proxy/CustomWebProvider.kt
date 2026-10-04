@@ -11,8 +11,6 @@ import android.webkit.WebView
 import android.view.KeyEvent
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
@@ -107,7 +105,6 @@ internal fun isArenaGeneratedImageUrl(url: String): Boolean {
 
 // Chat and image generation share one WebView. A mode switch from one request
 // must not race the other automation path.
-private val customWebAutomationLock = Mutex()
 
 /**
  * A custom provider can contain a stale selector, a copied placeholder, or CSS
@@ -225,7 +222,6 @@ fun builtInBrowserRelayConfig(provider: WebProviderType): CustomWebProviderConfi
 
 object CustomWebChatAutomation {
     private val main = Handler(Looper.getMainLooper())
-    private val lock = customWebAutomationLock
     @Volatile private var attached: Pair<WebView, String>? = null
 
     fun attach(view: WebView, configId: String) { attached = view to configId }
@@ -281,7 +277,7 @@ object CustomWebChatAutomation {
         messages: List<ChatMessage>,
         wantedModel: String? = null,
         onUpdate: suspend (String) -> Unit,
-    ): String = lock.withLock {
+    ): String = BrowserRelayLane.run(config.modelId) relay@ {
         val (view, _) = awaitAttached(config)
         checkArenaGuestBlocker(view, config)
         ensureArenaTextMode(view, config)
@@ -716,21 +712,21 @@ object CustomWebChatAutomation {
                 // Google sign-in before its intercepted response body closes.
                 // Preserve that answer and let the local SSE emit stop/[DONE].
                 val answerStable = System.currentTimeMillis() - lastArenaUpdateAt >= 8_000
-                if (captureDone || !stillOnArena || answerStable) return@withLock last
+                if (captureDone || !stillOnArena || answerStable) return@relay last
             }
             // 豆包等流式渲染页面：文本持续增长时无法连续 N 次相同，用「内容有更新且
             // 已停止增长一段时间」判定完成，而不是死等 stable 15 次。
             val isStreamingPage = config.loginUrl.contains("doubao.com", ignoreCase = true)
             val stableTarget = if (sawBusy && !busy) 3 else 15
             val quietMs = System.currentTimeMillis() - lastArenaUpdateAt
-            if (!busy && stable >= stableTarget) return@withLock last
+            if (!busy && stable >= stableTarget) return@relay last
             // 流式页兜底：回复文本非空，且已静默一段时间 → 视为完成。
             // 发图（视觉推理）输出可能分段停顿，静默阈值放宽到 6 秒避免截断；
             // 纯文字 2.5 秒即可。
             val quietThreshold = if (hasImageAttachments) 6_000L else 2_500L
-            if (isStreamingPage && last.isNotBlank() && quietMs >= quietThreshold) return@withLock last
+            if (isStreamingPage && last.isNotBlank() && quietMs >= quietThreshold) return@relay last
         }
-        if (arenaGuest && last.isNotBlank()) return@withLock last
+        if (arenaGuest && last.isNotBlank()) return@relay last
         throw WebAutomationException("chat_timeout", "${config.name} 网页回复等待超时")
     }
 
@@ -1181,7 +1177,6 @@ object CustomWebChatAutomation {
 
 object CustomWebImageAutomation {
     private val main = Handler(Looper.getMainLooper())
-    private val lock = customWebAutomationLock
     private val imageClient = OkHttpClient()
     @Volatile private var attached: Pair<WebView, String>? = null
 
@@ -1189,19 +1184,19 @@ object CustomWebImageAutomation {
     fun detach(view: WebView) { if (attached?.first === view) attached = null }
     fun attachedConfigId(): String? = attached?.second
 
-    suspend fun generateImage(config: CustomWebProviderConfig, prompt: String, ratio: String?, refImages: List<ChatAttachment> = emptyList(), arenaModelId: String = ""): List<String> = lock.withLock {
+    suspend fun generateImage(config: CustomWebProviderConfig, prompt: String, ratio: String?, refImages: List<ChatAttachment> = emptyList(), arenaModelId: String = ""): List<String> = BrowserRelayLane.run(config.modelId) relay@ {
         val (view, _) = awaitAttached(config)
         if (isArenaGuestWebConfig(config)) {
-            return@withLock generateArenaImage(view, config, prompt, ratio, arenaModelId)
+            return@relay generateArenaImage(view, config, prompt, ratio, arenaModelId)
         }
         if (isKnownCustomWebHybridImagePage(config.loginUrl)) {
-            return@withLock generateLongCat(view, config, prompt, refImages)
+            return@relay generateLongCat(view, config, prompt, refImages)
         }
         if (config.loginUrl.contains("image.dddd.zone", ignoreCase = true)) {
-            return@withLock generateDddd(view, config, prompt)
+            return@relay generateDddd(view, config, prompt)
         }
         if (!config.imageProvider) {
-            return@withLock generateChatPageImage(view, config, prompt, ratio)
+            return@relay generateChatPageImage(view, config, prompt, ratio)
         }
         val size = when (ratio) {
             "16:9" -> "1280x720"
@@ -1228,7 +1223,7 @@ object CustomWebImageAutomation {
             val state = evaluate(view, """(()=>{const i=document.querySelector('#generatedImage');const e=document.querySelector('#error');return JSON.stringify({src:i?.src||'',shown:!!i&&i.offsetParent!==null,error:e&&e.offsetParent!==null?(e.innerText||''):''})})()""")
             val obj = runCatching { JSONObject(state) }.getOrDefault(JSONObject())
             val src = obj.optString("src")
-            if (obj.optBoolean("shown") && src.isNotBlank() && src != baseline) return@withLock listOf(src)
+            if (obj.optBoolean("shown") && src.isNotBlank() && src != baseline) return@relay listOf(src)
             obj.optString("error").takeIf { it.isNotBlank() }?.let {
                 throw WebAutomationException("upstream_page_error", it)
             }
@@ -2168,7 +2163,6 @@ object CustomWebImageAutomation {
  */
 object CustomWebVideoAutomation {
     private val main = Handler(Looper.getMainLooper())
-    private val lock = customWebAutomationLock
     private val client = OkHttpClient()
 
     @Volatile private var attached: Pair<WebView, String>? = null
@@ -2177,12 +2171,12 @@ object CustomWebVideoAutomation {
     fun detach(view: WebView) { if (attached?.first === view) attached = null }
     fun attachedConfigId(): String? = attached?.second
 
-    suspend fun generateVideo(config: CustomWebProviderConfig, prompt: String, refImages: List<ChatAttachment> = emptyList()): List<String> = lock.withLock {
+    suspend fun generateVideo(config: CustomWebProviderConfig, prompt: String, refImages: List<ChatAttachment> = emptyList()): List<String> = BrowserRelayLane.run(config.modelId) relay@ {
         val (view, _) = awaitAttached(config)
         android.util.Log.i("CustomWebVideo", "generateVideo 入口 prompt=${prompt.take(40)} refImages=${refImages.size} config=${config.name}")
         // 美团（LongCat）：走专用逻辑（模式切换/ProseMirror 输入/send-btn），与生图同构
         if (config.loginUrl.contains("longcat.chat", ignoreCase = true)) {
-            return@withLock generateLongCatVideo(view, config, prompt, refImages)
+            return@relay generateLongCatVideo(view, config, prompt, refImages)
         }
         // 识别「生成视频」按钮：优先中文文案，兜底 video 相关英文
         val submitted = evaluate(view, """
@@ -2265,7 +2259,7 @@ object CustomWebVideoAutomation {
             }.getOrDefault(emptyList())
             if (srcs.isNotEmpty()) {
                 android.util.Log.i("CustomWebVideo", "解析到视频 ${srcs.size} 个: ${srcs.first().take(100)}")
-                return@withLock srcs.distinct()
+                return@relay srcs.distinct()
             }
         }
         throw WebAutomationException("video_timeout", "${config.name} 网页视频生成等待超时")

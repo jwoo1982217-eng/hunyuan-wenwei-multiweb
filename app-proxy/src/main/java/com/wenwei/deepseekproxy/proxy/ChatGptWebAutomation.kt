@@ -6,8 +6,6 @@ import android.webkit.WebView
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.suspendCancellableCoroutine
 import org.json.JSONArray
 import org.json.JSONObject
@@ -16,7 +14,6 @@ import kotlin.coroutines.resume
 /** Drives the normal signed-in ChatGPT web UI without bypassing verification. */
 object ChatGptWebAutomation {
     private val main = Handler(Looper.getMainLooper())
-    private val requestLock = Mutex()
     @Volatile private var attached: WebView? = null
 
     fun attach(webView: WebView) {
@@ -31,7 +28,7 @@ object ChatGptWebAutomation {
     fun isAttached(webView: WebView): Boolean = attached === webView
     fun isAttached(): Boolean = attached != null
 
-    suspend fun generateImage(prompt: String): List<String> = requestLock.withLock {
+    suspend fun generateImage(prompt: String): List<String> = BrowserRelayLane.run("gpt-image-2") relay@ {
         require(prompt.isNotBlank()) { "prompt不能为空" }
         val webView = BrowserRelayActivation.activateAndAwait("gpt-image-2") { attached }
             ?: throw WebAutomationException("webview_not_ready", "请先在浏览器页打开 ChatGPT Web 并保持 App 运行")
@@ -122,7 +119,7 @@ object ChatGptWebAutomation {
             stablePolls = if (urls.isNotEmpty() && urls == lastUrls) stablePolls + 1 else 0
             lastUrls = urls
             if (urls.isNotEmpty() && (!state.optBoolean("busy") || stablePolls >= 2)) {
-                return@withLock urls.map { url ->
+                return@relay urls.map { url ->
                     runCatching { materializeImage(webView, url) }.getOrElse { error ->
                         LogStore.w("ChatGPTImage", "图片本地缓存失败，保留网页地址：${error.message}")
                         url

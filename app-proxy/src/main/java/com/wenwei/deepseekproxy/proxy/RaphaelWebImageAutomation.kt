@@ -6,8 +6,6 @@ import android.webkit.WebView
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.suspendCancellableCoroutine
 import org.json.JSONArray
 import org.json.JSONObject
@@ -16,7 +14,6 @@ import kotlin.coroutines.resume
 /** Automates Raphael's public, no-login Basic image generator in a visible WebView. */
 object RaphaelWebImageAutomation {
     private val main = Handler(Looper.getMainLooper())
-    private val lock = Mutex()
     @Volatile private var attached: WebView? = null
 
     fun attach(view: WebView) {
@@ -31,7 +28,7 @@ object RaphaelWebImageAutomation {
         if (attached === view) attached = null
     }
 
-    suspend fun generateImage(prompt: String, ratio: String?): List<String> = lock.withLock {
+    suspend fun generateImage(prompt: String, ratio: String?): List<String> = BrowserRelayLane.run("raphael-image-web") relay@ {
         require(prompt.isNotBlank()) { "prompt不能为空" }
         val view = BrowserRelayActivation.activateAndAwait("raphael-image-web") { attached }
             ?: throw WebAutomationException(
@@ -101,7 +98,7 @@ object RaphaelWebImageAutomation {
             lastUrls = urls
             if (urls.isNotEmpty() && (!currentState.optBoolean("busy") || stable >= 3)) {
                 LogStore.i("RaphaelImage", "生成完成，提取到 ${urls.size} 张图片")
-                return@withLock urls.take(4)
+                return@relay urls.take(4)
             }
             if (currentState.optBoolean("busy") && System.currentTimeMillis() - lastProgressLog >= 15_000) {
                 LogStore.i("RaphaelImage", "仍在生成/排队，已等待 ${((180_000 - (deadline - System.currentTimeMillis())) / 1000)} 秒")

@@ -2609,6 +2609,7 @@ fun LogScreen(
 ) {
     val context = LocalContext.current
     val listState = rememberLazyListState()
+    val browserCalls by com.wenwei.deepseekproxy.proxy.BrowserCallTelemetry.calls.collectAsState()
     LaunchedEffect(logs.size) {
         if (logs.isNotEmpty()) listState.animateScrollToItem(logs.lastIndex)
     }
@@ -2629,6 +2630,26 @@ fun LogScreen(
             }
         }
         HorizontalDivider()
+        browserCalls.firstOrNull()?.let { latest ->
+            val elapsed by produceState(latest.elapsedMs, latest.requestId, latest.state) {
+                if (latest.state == "running") {
+                    while (true) {
+                        value = (System.currentTimeMillis() - latest.startedAt).coerceAtLeast(latest.elapsedMs)
+                        kotlinx.coroutines.delay(1_000)
+                    }
+                } else value = latest.elapsedMs
+            }
+            Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp)) {
+                Text("最近网页调用：${latest.modelId} · ${latest.stage}", style = MaterialTheme.typography.bodyMedium)
+                Text(
+                    "排队 ${latest.queueMs?.let { "${it}ms" } ?: "—"} · 首次输出 ${latest.firstOutputMs?.let { "${it}ms" } ?: "—"} · 已用时 ${elapsed}ms",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                if (latest.pageModel.isNotBlank()) Text("网页模型：${latest.pageModel}", style = MaterialTheme.typography.bodySmall)
+                if (latest.errorCode.isNotBlank()) Text("失败原因：${latest.errorCode}", style = MaterialTheme.typography.bodySmall)
+            }
+            HorizontalDivider()
+        }
         SelectionContainer(Modifier.fillMaxSize().padding(8.dp)) {
             LazyColumn(Modifier.fillMaxSize(), state = listState) {
                 items(logs) { line ->
@@ -3294,6 +3315,7 @@ fun BrowserScreen(
         key(webViewGeneration) { AndroidView(
             factory = { ctx ->
                 TouchWebView(ctx).apply {
+                    com.wenwei.deepseekproxy.proxy.BrowserChatRuntime.install(this)
                     // 关键：AndroidView 默认给子 View 设 WRAP_CONTENT，WebView 在内容未布局前会塌成 0 高度导致空白。
                     // 必须显式 MATCH_PARENT 让其撑满父容器。
                     layoutParams = android.view.ViewGroup.LayoutParams(
@@ -3483,6 +3505,7 @@ fun BrowserScreen(
                             urlStr?.let { url = it }
                             userTouchedWebView = false   // 新页面加载，重置触摸标记
                             if (view != null) {
+                                com.wenwei.deepseekproxy.proxy.BrowserChatRuntime.pageChanged(view)
                                 if (currentBrowserProvider == WebProviderType.CUSTOM_WEB &&
                                     currentActiveCustom?.let {
                                         !isCustomWebViewOnProviderPage(it, urlStr.orEmpty())
@@ -3514,6 +3537,7 @@ fun BrowserScreen(
                         }
 
                         override fun onPageFinished(view: WebView?, urlStr: String?) {
+                            com.wenwei.deepseekproxy.proxy.BrowserCallTelemetry.hostState = "mounted"
                             progress = 0
                             CookieManager.getInstance().flush()
                             // 「重置当前登录」请求的 localStorage 清空（cnb.cool 等站点登录态存 localStorage，
@@ -3648,6 +3672,17 @@ fun BrowserScreen(
                             detail: android.webkit.RenderProcessGoneDetail?
                         ): Boolean {
                             LogStore.e("Browser", "WebView渲染进程退出，崩溃=${detail?.didCrash()}，准备重建")
+                            if (view != null) {
+                                com.wenwei.deepseekproxy.proxy.BrowserChatRuntime.release(view, "浏览器渲染进程退出")
+                                com.wenwei.deepseekproxy.proxy.ChatGptWebChatAutomation.detach(view)
+                                com.wenwei.deepseekproxy.proxy.GeminiWebChatAutomation.detach(view)
+                                com.wenwei.deepseekproxy.proxy.ChatGptWebAutomation.detach(view)
+                                com.wenwei.deepseekproxy.proxy.GeminiWebImageAutomation.detach(view)
+                                com.wenwei.deepseekproxy.proxy.CustomWebChatAutomation.detach(view)
+                                com.wenwei.deepseekproxy.proxy.CustomWebImageAutomation.detach(view)
+                                com.wenwei.deepseekproxy.proxy.CustomWebVideoAutomation.detach(view)
+                                com.wenwei.deepseekproxy.proxy.RaphaelWebImageAutomation.detach(view)
+                            }
                             view?.destroy()
                             webViewRef.value = null
                             webViewGeneration++
@@ -3746,6 +3781,7 @@ fun BrowserScreen(
                 it.settings.javaScriptCanOpenWindowsAutomatically = provider != WebProviderType.DOUBAO_WEB
             },
             onRelease = {
+                com.wenwei.deepseekproxy.proxy.BrowserChatRuntime.release(it, "浏览器已关闭")
                 com.wenwei.deepseekproxy.proxy.CustomWebChatAutomation.detach(it)
                 com.wenwei.deepseekproxy.proxy.CustomWebImageAutomation.detach(it)
                 com.wenwei.deepseekproxy.proxy.CustomWebVideoAutomation.detach(it)

@@ -16,6 +16,7 @@ import io.ktor.utils.io.writeFully
 import io.ktor.util.AttributeKey
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.sync.Mutex
@@ -75,7 +76,9 @@ data class ChatCompletionRequest(
     val stream: Boolean = false,
     val temperature: Double? = null,
     val max_tokens: Int? = null,
-    val conversation_id: String? = null
+    val conversation_id: String? = null,
+    val web_model: String? = null,
+    val web_timeout_seconds: Int? = null,
 )
 
 @Serializable
@@ -482,6 +485,9 @@ object ProxyServer {
             ),
             bindHost = BIND_HOST,
             port = boundPort,
+        ).copy(
+            browserHostState = BrowserCallTelemetry.hostState,
+            browserCalls = BrowserCallTelemetry.calls.value,
         )
     }
 
@@ -712,24 +718,24 @@ object ProxyServer {
         req: ChatCompletionRequest,
         completionId: String,
         created: Int,
+        timeoutMs: Long = 300_000,
+        keepAlive: Boolean = false,
         producer: suspend (suspend (String) -> Unit) -> Unit,
     ) {
         if (!req.stream) {
             val content = try {
-                withTimeout(300_000) {
+                withTimeout(timeoutMs) {
                     buildString { producer { append(it) } }
                 }.also { GatewayModelHealth.record(req.model, true) }
             } catch (e: Exception) {
                 GatewayModelHealth.record(req.model, false)
                 throw e
             }
-            call.respond(
-                ChatCompletion(
-                    completionId, "chat.completion", created, req.model,
-                    listOf(Choice(message = Msg("assistant", content), finish_reason = "stop")),
-                    Usage(), ""
-                )
-            )
+            call.respond(ChatCompletion(
+                completionId, "chat.completion", created, req.model,
+                listOf(Choice(message = Msg("assistant", content), finish_reason = "stop")),
+                Usage(), "",
+            ))
             return
         }
         call.respond(object : OutgoingContent.WriteChannelContent() {
@@ -739,49 +745,29 @@ object ProxyServer {
                 append("Connection", "keep-alive")
                 append("X-Accel-Buffering", "no")
             }
-            override suspend fun writeTo(channel: ByteWriteChannel) {
+            override suspend fun writeTo(channel: ByteWriteChannel) = withWebChatSse(channel, keepAlive) { write ->
+                suspend fun emit(delta: ChoiceDelta, finish: String? = null) {
+                    val chunk = ChatCompletionChunk(
+                        completionId, created = created, model = req.model,
+                        choices = listOf(ChunkChoice(delta = delta, finish_reason = finish)),
+                    )
+                    write("data: " + json.encodeToString(ChatCompletionChunk.serializer(), chunk) + "\n\n")
+                }
                 try {
-                    fun encode(chunk: ChatCompletionChunk) =
-                        "data: ${json.encodeToString(ChatCompletionChunk.serializer(), chunk)}\n\n"
-                    channel.writeFully(encode(ChatCompletionChunk(
-                        completionId, created = created, model = req.model,
-                        choices = listOf(ChunkChoice(delta = ChoiceDelta(role = "assistant")))
-                    )).toByteArray())
-                    channel.flush()
-                    withTimeout(300_000) {
-                        producer { delta ->
-                            if (delta.isNotEmpty()) {
-                                channel.writeFully(encode(ChatCompletionChunk(
-                                    completionId, created = created, model = req.model,
-                                    choices = listOf(ChunkChoice(delta = ChoiceDelta(content = delta)))
-                                )).toByteArray())
-                                channel.flush()
-                            }
-                        }
+                    emit(ChoiceDelta(role = "assistant"))
+                    withTimeout(timeoutMs) {
+                        producer { delta -> if (delta.isNotEmpty()) emit(ChoiceDelta(content = delta)) }
                     }
-                    channel.writeFully(encode(ChatCompletionChunk(
-                        completionId, created = created, model = req.model,
-                        choices = listOf(ChunkChoice(delta = ChoiceDelta(), finish_reason = "stop"))
-                    )).toByteArray())
-                    channel.writeFully("data: [DONE]\n\n".toByteArray())
-                    channel.flush()
+                    emit(ChoiceDelta(), "stop")
+                    write("data: [DONE]\n\n")
                     GatewayModelHealth.record(req.model, true)
                 } catch (e: Exception) {
                     GatewayModelHealth.record(req.model, false)
-                    // 不裸断流：把错误作为 SSE 事件写出，客户端收到明确错误而非 EOFException
+                    if (e is kotlinx.coroutines.CancellationException && !kotlin.coroutines.coroutineContext.isActive) throw e
                     try {
-                        val errJson = org.json.JSONObject().apply {
-                            put("error", org.json.JSONObject().apply {
-                                put("type", "upstream_error")
-                                put("code", (e as? WebAutomationException)?.code ?: e.javaClass.simpleName)
-                                put("message", e.message ?: e.toString())
-                            })
-                        }.toString()
-                        channel.writeFully("data: $errJson\n\n".toByteArray())
-                        channel.writeFully("data: [DONE]\n\n".toByteArray())
-                        channel.flush()
-                    } catch (_: Exception) {
-                    }
+                        write("data: " + webChatErrorJson(e, if (keepAlive) "webview_automation_error" else "upstream_error") + "\n\n")
+                        write("data: [DONE]\n\n")
+                    } catch (_: Exception) { }
                 }
             }
         })
@@ -1147,30 +1133,43 @@ object ProxyServer {
         })
     }
 
+    private suspend fun RoutingContext.webChatOptions(req: ChatCompletionRequest): WebChatOptions? = try {
+        WebChatOptions.fromRequest(req.web_model, req.web_timeout_seconds)
+    } catch (e: WebAutomationException) {
+        call.respond(HttpStatusCode.BadRequest, mapOf("error" to mapOf(
+            "type" to "invalid_request_error", "code" to e.code, "message" to (e.message ?: e.code),
+        )))
+        null
+    }
+
     private suspend fun RoutingContext.handleChatGptWebChat(req: ChatCompletionRequest) {
+        val options = webChatOptions(req) ?: return
         val completionId = "chatcmpl-${UUID.randomUUID().toString().take(12)}"
         val created = (System.currentTimeMillis() / 1000).toInt()
         try {
-            respondProviderText(req, completionId, created) { emit ->
-                var previous = ""
-                withTimeout(200_000) {
-                    ChatGptWebChatAutomation.chat(req.messages) { complete ->
-                        val delta = if (complete.startsWith(previous)) complete.removePrefix(previous) else complete
-                        previous = complete
-                        if (delta.isNotEmpty()) emit(delta)
+            respondProviderText(req, completionId, created,
+                timeoutMs = options.replyTimeoutMs + 150_000, keepAlive = true) { emit ->
+                if (req.stream) {
+                    val delta = WebChatTextDelta()
+                    ChatGptWebChatAutomation.chat(req.messages, options) { complete ->
+                        delta.next(complete).takeIf(String::isNotEmpty)?.let { emit(it) }
                     }
+                } else {
+                    // Full JSON can accommodate DOM revisions; do not concatenate intermediate snapshots.
+                    emit(ChatGptWebChatAutomation.chat(req.messages, options))
                 }
             }
         } catch (e: WebAutomationException) {
             LogStore.e("ChatGPTChat", "${e.code}: ${e.message}")
             if (!call.response.isSent) call.respond(HttpStatusCode.ServiceUnavailable, mapOf("error" to mapOf(
                 "type" to "webview_automation_error", "code" to e.code,
-                "message" to (e.message ?: e.code)
+                "message" to (e.message ?: e.code),
             )))
         }
     }
 
     private suspend fun RoutingContext.handleGeminiWebChat(req: ChatCompletionRequest) {
+        val options = webChatOptions(req) ?: return
         val completionId = "chatcmpl-${UUID.randomUUID().toString().take(12)}"
         val created = (System.currentTimeMillis() / 1000).toInt()
         if (req.stream) {
@@ -1179,57 +1178,61 @@ object ProxyServer {
                 override val headers = Headers.build {
                     append("Cache-Control", "no-cache")
                     append("Connection", "keep-alive")
+                    append("X-Accel-Buffering", "no")
                 }
-                override suspend fun writeTo(channel: ByteWriteChannel) {
+                override suspend fun writeTo(channel: ByteWriteChannel) = withWebChatSse(channel, true) { write ->
                     suspend fun emit(delta: ChoiceDelta, finish: String? = null) {
                         val chunk = ChatCompletionChunk(
                             completionId, created = created, model = req.model,
-                            choices = listOf(ChunkChoice(delta = delta, finish_reason = finish))
+                            choices = listOf(ChunkChoice(delta = delta, finish_reason = finish)),
                         )
-                        channel.writeFully(("data: " + json.encodeToString(ChatCompletionChunk.serializer(), chunk) + "\n\n").toByteArray())
-                        channel.flush()
+                        write("data: " + json.encodeToString(ChatCompletionChunk.serializer(), chunk) + "\n\n")
                     }
-                    emit(ChoiceDelta(role = "assistant"))
-                    var sentText = ""
+                    val delta = WebChatTextDelta()
                     val sentImages = linkedSetOf<String>()
                     try {
-                        withTimeout(200_000) {
-                            GeminiWebChatAutomation.chat(req.messages) { update ->
-                                val deltaText = if (update.text.startsWith(sentText)) update.text.removePrefix(sentText) else update.text
+                        emit(ChoiceDelta(role = "assistant"))
+                        withTimeout(options.replyTimeoutMs + 150_000) {
+                            GeminiWebChatAutomation.chat(req.messages, options) { update ->
+                                val deltaText = delta.next(update.text)
                                 val deltaImages = update.images.filter(sentImages::add)
                                 if (deltaText.isNotEmpty() || deltaImages.isNotEmpty()) {
                                     emit(ChoiceDelta(content = deltaText.takeIf(String::isNotEmpty), images = deltaImages))
                                 }
-                                sentText = update.text
                             }
                         }
                         emit(ChoiceDelta(), "stop")
-                        channel.writeFully("data: [DONE]\n\n".toByteArray())
-                        channel.flush()
+                        write("data: [DONE]\n\n")
                         GatewayModelHealth.record(req.model, true)
                     } catch (e: Exception) {
                         GatewayModelHealth.record(req.model, false)
+                        if (e is kotlinx.coroutines.CancellationException && !kotlin.coroutines.coroutineContext.isActive) throw e
                         LogStore.e("GeminiChat", "stream: ${e.message}")
-                        throw e
+                        try {
+                            write("data: " + webChatErrorJson(e) + "\n\n")
+                            write("data: [DONE]\n\n")
+                        } catch (_: Exception) { }
                     }
                 }
             })
             return
         }
         val result = try {
-            withTimeout(200_000) { GeminiWebChatAutomation.chat(req.messages) }
+            withTimeout(options.replyTimeoutMs + 150_000) { GeminiWebChatAutomation.chat(req.messages, options) }
+                .also { GatewayModelHealth.record(req.model, true) }
         } catch (e: WebAutomationException) {
+            GatewayModelHealth.record(req.model, false)
             LogStore.e("GeminiChat", "${e.code}: ${e.message}")
             call.respond(HttpStatusCode.ServiceUnavailable, mapOf("error" to mapOf(
                 "type" to "webview_automation_error", "code" to e.code,
-                "message" to (e.message ?: e.code)
+                "message" to (e.message ?: e.code),
             )))
             return
         }
         call.respond(ChatCompletion(
             completionId, "chat.completion", created, req.model,
             listOf(Choice(message = Msg("assistant", result.text, result.images), finish_reason = "stop")),
-            Usage(), ""
+            Usage(), "",
         ))
     }
 

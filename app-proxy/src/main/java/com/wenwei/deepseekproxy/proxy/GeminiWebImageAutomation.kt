@@ -10,8 +10,6 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.isActive
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
@@ -53,7 +51,6 @@ internal fun buildGeminiImageInstruction(prompt: String, ratio: String?): String
 /** Generates images through the user's visible, signed-in Gemini WebView. */
 object GeminiWebImageAutomation {
     private val main = Handler(Looper.getMainLooper())
-    private val requestLock = Mutex()
     @Volatile private var attached: WebView? = null
 
     fun attach(webView: WebView) {
@@ -67,7 +64,7 @@ object GeminiWebImageAutomation {
 
     fun isAttached(): Boolean = attached != null
 
-    suspend fun generateImage(prompt: String, ratio: String?): List<String> = requestLock.withLock {
+    suspend fun generateImage(prompt: String, ratio: String?): List<String> = BrowserRelayLane.run("gemini-image-web") relay@ {
         require(prompt.isNotBlank()) { "prompt不能为空" }
         val webView = BrowserRelayActivation.activateAndAwait("gemini-image-web") { attached }
             ?: throw WebAutomationException(
@@ -151,7 +148,7 @@ object GeminiWebImageAutomation {
             stablePolls = if (urls.isNotEmpty() && urls == lastUrls) stablePolls + 1 else 0
             lastUrls = urls
             if (urls.isNotEmpty() && (!state.optBoolean("busy") || stablePolls >= 2)) {
-                return@withLock urls.map { materializeUrl(webView, it) }
+                return@relay urls.map { materializeUrl(webView, it) }
             }
             val pageError = state.optString("error")
             if (pageError.isNotBlank() && !state.optBoolean("busy")) {

@@ -50,6 +50,8 @@ data class LocalGatewayStatusResponse(
     val models: List<GatewayStatusModel>,
     val capabilities: List<GatewayCapabilityStatus>,
     val providers: List<GatewayProviderStatus>,
+    val browserHostState: String = "closed",
+    val browserCalls: List<BrowserCallRecord> = emptyList(),
 )
 
 data class GatewayRuntimeSnapshot(
