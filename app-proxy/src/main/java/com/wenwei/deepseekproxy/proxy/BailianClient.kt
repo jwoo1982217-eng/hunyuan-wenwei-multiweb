@@ -79,6 +79,32 @@ object BailianClient {
         }
     }
 
+    // ── 凭证池（对齐 Z·阅读：多套游客会话，每次请求轮换，额度均摊）──
+    private val poolLock = Any()
+    private val configPool = mutableListOf<String>()
+    private val rotationIdx = java.util.concurrent.atomic.AtomicInteger(0)
+
+    /** 设置凭证池（UI 侧持久化为准，这里只挂运行时） */
+    fun setConfigList(list: List<String>) {
+        synchronized(poolLock) {
+            configPool.clear()
+            configPool.addAll(list.filter { it.isNotBlank() })
+        }
+        LogStore.i("Bailian", "凭证池已挂载 ${list.size} 套")
+    }
+
+    /**
+     * 轮换到下一套凭证（(idx+1) % size，与 Z·阅读 applyNextBailianConfig 一致）。
+     * 池子为空时不动当前配置（兼容旧的单套 bailian_config）。
+     */
+    fun applyNext() {
+        val list = synchronized(poolLock) { configPool.toList() }
+        if (list.isEmpty()) return
+        val idx = rotationIdx.getAndUpdate { i -> (i + 1) % list.size }
+        val next = list.getOrNull(idx % list.size) ?: return
+        applyConfig(next)
+    }
+
     fun isConfigured(): Boolean =
         cookies.isNotBlank() && bxUa.isNotBlank() && bxEt.isNotBlank()
 

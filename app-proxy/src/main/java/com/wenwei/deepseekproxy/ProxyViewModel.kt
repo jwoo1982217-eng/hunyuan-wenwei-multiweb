@@ -92,17 +92,93 @@ class ProxyViewModel(app: Application) : AndroidViewModel(app) {
     /** 百炼凭证（浏览器抓包自动写入；重启后由 ensureBailianLoaded 恢复） */
     @Volatile private var lastBailianJson: String = ""
 
+    // ── 百炼凭证池（对齐 Z·阅读）：多套游客会话，每次聊天请求自动轮换 ──
+    val bailianConfigs = kotlinx.coroutines.flow.MutableStateFlow<List<String>>(emptyList())
+    val bailianSelectedIndex = kotlinx.coroutines.flow.MutableStateFlow(0)
+
+    private fun persistBailianPool() {
+        prefs.edit()
+            .putString("bailian_configs", org.json.JSONArray(bailianConfigs.value).toString())
+            .putInt("bailian_config_selected", bailianSelectedIndex.value)
+            .apply()
+    }
+
+    private fun syncBailianRuntime() {
+        val list = bailianConfigs.value
+        com.wenwei.deepseekproxy.proxy.BailianClient.setConfigList(list)
+        list.getOrNull(bailianSelectedIndex.value)?.let {
+            lastBailianJson = it
+            com.wenwei.deepseekproxy.proxy.BailianClient.applyConfig(it)
+        }
+    }
+
+    /** 兼容迁移：旧的单套 bailian_config 迁进池子（只迁一次） */
+    private fun loadBailianPool() {
+        if (bailianConfigs.value.isNotEmpty()) return
+        val saved = prefs.getString("bailian_configs", "").orEmpty()
+        val list = runCatching {
+            val arr = org.json.JSONArray(saved)
+            (0 until arr.length()).map { arr.optString(it) }.filter { it.isNotBlank() }
+        }.getOrDefault(emptyList())
+        if (list.isNotEmpty()) {
+            bailianConfigs.value = list
+            bailianSelectedIndex.value =
+                prefs.getInt("bailian_config_selected", 0).coerceIn(0, list.size - 1)
+        } else {
+            val legacy = prefs.getString("bailian_config", "").orEmpty()
+            if (legacy.isNotBlank()) bailianConfigs.value = listOf(legacy)
+        }
+        if (bailianConfigs.value.isNotEmpty()) persistBailianPool()
+        syncBailianRuntime()
+    }
+
+    /** 浏览器捕获到新凭证：写入当前选中槽位（Z·阅读 setBailianFromRequest 同款语义） */
     fun applyBailianConfig(json: String) {
-        if (json == lastBailianJson) return
+        if (json.isBlank()) return
+        loadBailianPool()
+        val list = bailianConfigs.value.toMutableList()
+        val idx = bailianSelectedIndex.value.coerceIn(0, (list.size - 1).coerceAtLeast(0))
+        if (list.isEmpty()) list.add(json) else list[idx] = json
+        bailianConfigs.value = list
+        bailianSelectedIndex.value = idx
         lastBailianJson = json
         com.wenwei.deepseekproxy.proxy.BailianClient.applyConfig(json)
-        runCatching {
-            prefs.edit().putString("bailian_config", json).apply()
-        }
-        LogStore.i("Bailian", "百炼凭证已捕获并应用（cookies + bx 三件套）")
+        com.wenwei.deepseekproxy.proxy.BailianClient.setConfigList(list)
+        persistBailianPool()
+        LogStore.i("Bailian", "百炼凭证已捕获写入槽位 ${idx + 1}/${list.size}")
+    }
+
+    fun addBailianConfig() {
+        loadBailianPool()
+        val list = bailianConfigs.value + "{}"
+        bailianConfigs.value = list
+        bailianSelectedIndex.value = list.size - 1
+        persistBailianPool()
+        LogStore.i("Bailian", "新增百炼凭证槽位 ${list.size}（去浏览器捕获后自动填入）")
+    }
+
+    fun removeBailianConfig(index: Int) {
+        val list = bailianConfigs.value.toMutableList()
+        if (index !in list.indices) return
+        list.removeAt(index)
+        bailianConfigs.value = list
+        bailianSelectedIndex.value = bailianSelectedIndex.value.coerceIn(0, (list.size - 1).coerceAtLeast(0))
+        persistBailianPool()
+        syncBailianRuntime()
+    }
+
+    fun selectBailianConfig(index: Int) {
+        val list = bailianConfigs.value
+        if (index !in list.indices) return
+        bailianSelectedIndex.value = index
+        persistBailianPool()
+        lastBailianJson = list[index]
+        com.wenwei.deepseekproxy.proxy.BailianClient.applyConfig(list[index])
+        LogStore.i("Bailian", "切换到百炼凭证 ${index + 1}/${list.size}")
     }
 
     fun ensureBailianLoaded() {
+        loadBailianPool()
         if (lastBailianJson.isNotBlank()) return
         val saved = prefs.getString("bailian_config", "").orEmpty()
         if (saved.isNotBlank()) {

@@ -905,6 +905,8 @@ object ProxyServer {
         completionId: String,
         created: Int,
     ) {
+        // 凭证池轮换（对齐 Z·阅读）：每次请求换下一套游客会话，额度均摊防止单套耗尽
+        BailianClient.applyNext()
         if (!BailianClient.isConfigured()) {
             call.respond(HttpStatusCode.ServiceUnavailable, mapOf(
                 "error" to mapOf(

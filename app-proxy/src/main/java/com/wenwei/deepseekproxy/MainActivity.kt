@@ -819,6 +819,44 @@ private fun ApiProviderEditorDialog(
     )
 }
 
+/** 百炼凭证池管理（对齐 Z·阅读）：多套游客会话，聊天请求自动轮换摊薄额度 */
+@Composable
+private fun BailianPoolRow(vm: ProxyViewModel) {
+    val configs by vm.bailianConfigs.collectAsState()
+    val selected by vm.bailianSelectedIndex.collectAsState()
+    var poolExpanded by remember { mutableStateOf(false) }
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Box {
+            TextButton(onClick = { poolExpanded = !poolExpanded }) {
+                Text(
+                    if (configs.none { it != "{}" && it.isNotBlank() }) "百炼凭证：未捕获"
+                    else "百炼凭证 ${selected + 1}/${configs.size} ▾"
+                )
+            }
+            DropdownMenu(expanded = poolExpanded, onDismissRequest = { poolExpanded = false }) {
+                configs.forEachIndexed { i, cfg ->
+                    DropdownMenuItem(
+                        text = { Text("凭证 ${i + 1}${if (i == selected) " ✓" else ""}${if (cfg == "{}") "（空）" else ""}") },
+                        onClick = {
+                            vm.selectBailianConfig(i)
+                            poolExpanded = false
+                        }
+                    )
+                }
+            }
+        }
+        TextButton(onClick = { vm.addBailianConfig() }) { Text("＋新增") }
+        if (configs.size > 1) {
+            TextButton(onClick = { vm.removeBailianConfig(selected) }) { Text("删除当前") }
+        }
+    }
+    Text(
+        "每套额度独立：去浏览器点「百炼」并在体验页发一条消息，捕获会写入当前选中的槽位；聊天时自动轮换全部套",
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant
+    )
+}
+
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun ProxyScreen(
@@ -1155,6 +1193,7 @@ fun ProxyScreen(
                         Spacer(Modifier.width(8.dp))
                         OutlinedButton(onClick = onOpenCookieDialog) { Text("管理") }
                     }
+                    BailianPoolRow(vm)
                     OutlinedTextField(
                         value = localBearerToken,
                         onValueChange = {},
