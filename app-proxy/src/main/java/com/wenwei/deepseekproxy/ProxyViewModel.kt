@@ -497,7 +497,7 @@ class ProxyViewModel(app: Application) : AndroidViewModel(app) {
                 // 名字含 video 的挪到视频模型，避免「含 image/video 的模型留在聊天列表」。
                 fun isImageModel(id: String): Boolean =
                     id.contains("image", ignoreCase = true) ||
-                        Regex("dall|flux|sdxl|stable[-_]?diffusion|seedream|imagen|cogview", RegexOption.IGNORE_CASE).containsMatchIn(id)
+                        Regex("dall|flux|sdxl|stable[-_]?diffusion|seedream|imagen|cogview|wanx", RegexOption.IGNORE_CASE).containsMatchIn(id)
                 fun isVideoModel(id: String): Boolean =
                     id.contains("video", ignoreCase = true) ||
                         Regex("sora|kling|wanx|veo|t2v|v2v|text[-_]?to[-_]?video|animate|cogvideo", RegexOption.IGNORE_CASE).containsMatchIn(id)

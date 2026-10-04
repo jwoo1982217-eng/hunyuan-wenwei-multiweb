@@ -143,6 +143,19 @@ object OpenAiCompatibleClient {
                 videoModels = videos
             )
         }
+        // 阿里云百炼（dashscope.aliyuncs.com）：compatible-mode /models 只列 LLM，
+        // wanx 生图从不进列表；新条目注入默认万相清单（turbo 档有免费额度）。
+        // 注入规则与智谱同款：仅列表为空时注入，尊重用户自管清单。
+        if (config.baseUrl.contains("dashscope", ignoreCase = true)) {
+            val images = if (config.imageModels.isEmpty())
+                (result.imageModels + listOf("wanx2.1-t2i-turbo", "wanx2.1-t2i-plus", "wanx-v1")).distinct()
+                else result.imageModels
+            val allCount = (result.chatModels + images + result.videoModels).distinct().size
+            return result.copy(
+                message = "连接成功，发现 $allCount 个模型（聊天 ${result.chatModels.size}，生图 ${images.size}，视频 ${result.videoModels.size}）",
+                imageModels = images
+            )
+        }
         if (!HiApiImageClient.matches(config)) return result
         val current = result.imageModels
             .filterNot { it.equals("gpt-image-1", true) || it.equals("gpt-image-1.5", true) }
@@ -159,7 +172,7 @@ object OpenAiCompatibleClient {
     }
 
     private val IMAGE_MODEL_ID = Regex(
-        "(^|[-_./])(gpt[-_]?image|dall[-_]?e|flux|sdxl|stable[-_]?diffusion|imagen|seedream|recraft|ideogram|kolors|cogview|nano[-_]?banana|image[-_]?gen)([-_./]|$)",
+        "(^|[-_./])(gpt[-_]?image|dall[-_]?e|flux|sdxl|stable[-_]?diffusion|imagen|seedream|recraft|ideogram|kolors|cogview|nano[-_]?banana|image[-_]?gen|wanx[0-9]*)([-_./]|$)",
         RegexOption.IGNORE_CASE
     )
 
@@ -478,6 +491,11 @@ object OpenAiCompatibleClient {
         // 提交拿 task_id → 轮询 GET /tasks/{task_id} 直到 SUCCEEDED，把结果拼回 OpenAI 响应。
         if (config.baseUrl.contains("modelscope", ignoreCase = true)) {
             return modelscopeImage(config, upstreamModel, jsonBody)
+        }
+        // 阿里云百炼/通义万相（dashscope.aliyuncs.com）：OpenAI images 端点不覆盖
+        // wanx 生图，改走原生异步协议（提交 image-synthesis → 轮询 tasks）。
+        if (config.baseUrl.contains("dashscope", ignoreCase = true)) {
+            return dashscopeImage(config, upstreamModel, jsonBody)
         }
         fun execute(body: String): Response = client.newCall(
             Request.Builder().url(endpoint(config, "images/generations"))
@@ -1061,5 +1079,106 @@ object OpenAiCompatibleClient {
             }
         }
         return relay(504, "Gateway Timeout", "{\"error\":{\"message\":\"魔搭生图任务超时\"}}")
+    }
+
+    /**
+     * 阿里云百炼 DashScope（dashscope.aliyuncs.com）通义万相系列。
+     * OpenAI 兼容端点不覆盖 wanx 生图，走原生异步协议：
+     *   POST {root}/api/v1/services/aigc/text2image/image-synthesis
+     *     headers: Authorization: Bearer <百炼API-KEY>；X-DashScope-Async: enable
+     *     body: {model, input:{prompt[, ref_img]}, parameters:{size:"W*H", n, negative_prompt}}
+     *   → {output:{task_id}}；GET {root}/api/v1/tasks/{task_id}（同鉴权）轮询至
+     *   task_status=SUCCEEDED，结果在 output.results[].url，拼回 OpenAI data[].url。
+     * 适配点：size 分隔符 x 要换成 *（1024x1024→1024*1024）；image_data 参考图
+     * 映射到 input.ref_img（wanx 相似图生成，ref_strength 0.5）。root 从 baseUrl
+     * 剥掉 compatible-mode 等版本后缀得到裸域名根——聊天请求仍走用户填的
+     * compatible-mode 端点不受影响，同一个接口条目聊天生图两用。
+     */
+    private fun dashscopeRoot(config: ApiProviderConfig): String {
+        var value = config.normalizedBaseUrl().trim().trimEnd('/')
+        listOf("/compatible-mode/v1", "/compatible-mode", "/api/v1", "/v1").firstOrNull {
+            value.endsWith(it, ignoreCase = true)
+        }?.let { suffix -> value = value.dropLast(suffix.length).trimEnd('/') }
+        return value
+    }
+
+    private fun dashscopeImage(config: ApiProviderConfig, upstreamModel: String, jsonBody: JSONObject): Response {
+        val root = dashscopeRoot(config)
+        val requestId = Request.Builder().url("$root/api/v1/services/aigc/text2image/image-synthesis").build()
+        fun relay(code: Int, message: String, payload: String): Response = Response.Builder()
+            .request(requestId).protocol(Protocol.HTTP_1_1)
+            .code(code).message(message)
+            .body(payload.toResponseBody("application/json".toMediaType()))
+            .build()
+        val input = JSONObject().put("prompt", jsonBody.optString("prompt"))
+        val parameters = JSONObject()
+        // 万相 size 用 * 分隔；比例串(9:16)已被上游兜底转成 WxH
+        val sizeVal = jsonBody.optString("size").replace('x', '*').replace('X', '*')
+        if (sizeVal.isNotBlank()) parameters.put("size", sizeVal)
+        jsonBody.optString("negative_prompt").takeIf(String::isNotBlank)?.let { parameters.put("negative_prompt", it) }
+        // 图生图参考图：image_data(墨听 dataURI 形态) → input.ref_img
+        jsonBody.optJSONArray("image_data")?.let { arr ->
+            if (arr.length() > 0) {
+                val item = arr.optJSONObject(0)
+                val data = item?.optString("data", "").orEmpty()
+                if (data.isNotBlank()) {
+                    val payload = if (data.contains("base64,")) data.substringAfter("base64,") else data
+                    val mime = item?.optString("mime", "image/png")?.ifBlank { "image/png" } ?: "image/png"
+                    input.put("ref_img", "data:$mime;base64,$payload")
+                    parameters.put("ref_strength", 0.5)
+                }
+            }
+            jsonBody.remove("image_data")
+        }
+        parameters.put("n", jsonBody.optInt("n", 1).coerceIn(1, 4))
+        val submitBody = JSONObject()
+            .put("model", upstreamModel)
+            .put("input", input)
+            .put("parameters", parameters)
+            .toString()
+        val submitResp = runCatching {
+            longClient.newCall(Request.Builder().url(requestId.url)
+                .authorize(config)
+                .header("Content-Type", "application/json")
+                .header("X-DashScope-Async", "enable")
+                .post(submitBody.toRequestBody("application/json".toMediaType())).build()
+            ).execute()
+        }.getOrElse { return relay(502, "Bad Gateway", "{\"error\":{\"message\":\"${it.message ?: it.javaClass.simpleName}\"}}") }
+        val submitText = submitResp.body?.string().orEmpty()
+        val submitCode = submitResp.code
+        submitResp.close()
+        if (submitCode !in 200..299) {
+            return relay(submitCode, "Bad Gateway", submitText.ifBlank { "{\"error\":{\"message\":\"submit failed\"}}" })
+        }
+        val taskId = runCatching { JSONObject(submitText).optJSONObject("output")?.optString("task_id", "") }.getOrNull().orEmpty()
+        if (taskId.isBlank()) return relay(200, "OK", submitText)
+        val deadline = System.currentTimeMillis() + 300_000
+        while (System.currentTimeMillis() < deadline) {
+            Thread.sleep(2_500)
+            val pollResp = runCatching {
+                longClient.newCall(Request.Builder().url("$root/api/v1/tasks/$taskId")
+                    .authorize(config).get().build()).execute()
+            }.getOrElse { return relay(502, "Bad Gateway", "{\"error\":{\"message\":\"poll failed: ${it.message}\"}}") }
+            val pollText = pollResp.body?.string().orEmpty()
+            pollResp.close()
+            val output = runCatching { JSONObject(pollText).optJSONObject("output") }.getOrNull()
+            when (output?.optString("task_status", "")) {
+                "SUCCEEDED" -> {
+                    val urls = mutableListOf<String>()
+                    output.optJSONArray("results")?.let { a ->
+                        for (i in 0 until a.length()) a.optJSONObject(i)?.optString("url", "")?.takeIf(String::isNotBlank)?.let(urls::add)
+                    }
+                    if (urls.isEmpty()) return relay(502, "Bad Gateway", "{\"error\":{\"message\":\"万相任务成功但无结果图: ${pollText.take(300)}\"}}")
+                    val out = JSONObject().put("created", (System.currentTimeMillis() / 1000).toInt())
+                        .put("data", org.json.JSONArray().apply { urls.forEach { put(JSONObject().put("url", it)) } })
+                    return relay(200, "OK", out.toString())
+                }
+                "FAILED", "CANCELED", "UNKNOWN" -> {
+                    val msg = output.optString("message", "").ifBlank { output.optString("task_status") }
+                    return relay(502, "Bad Gateway", "{\"error\":{\"message\":\"万相任务失败: $msg\"}}")
+                }
+            }
+        }
+        return relay(504, "Gateway Timeout", "{\"error\":{\"message\":\"万相生图任务超时（5分钟）\"}}")
     }
 }
