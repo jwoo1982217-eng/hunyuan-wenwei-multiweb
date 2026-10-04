@@ -73,23 +73,19 @@ object ModelScopeImageClient {
         if (prompt.isBlank()) {
             return relayError(stubUrl, 400, "missing_prompt", "缺少 prompt")
         }
-        val isVideo = upstreamModel.contains("video", ignoreCase = true) ||
-            upstreamModel.contains("wan2", ignoreCase = true) ||
-            upstreamModel.contains("t2v", ignoreCase = true)
-        val taskType = if (isVideo) "VIDEO_GENERATION" else "IMAGE_GENERATION"
         val taskBody = JSONObject().apply {
             put("model", upstreamModel)
             put("prompt", prompt)
             request.optString("size").takeIf(String::isNotBlank)?.let { put("size", it) }
+            request.optInt("seed", -1).takeIf { it >= 0 }?.let { put("seed", it) }
         }
 
-        // 1) 提交任务
-        val submitReq = Request.Builder().url("$root/tasks")
+        // 1) 提交任务（官方异步生图：POST {root}/images/generations + Async-Mode 头）
+        val submitReq = Request.Builder().url("$root/images/generations")
             .post(taskBody.toString().toRequestBody("application/json".toMediaType()))
             .apply {
                 header("Authorization", "Bearer $apiKey")
                 header("X-ModelScope-Async-Mode", "true")
-                header("X-ModelScope-Task-Type", taskType)
             }.build()
         val submitResp = runCatching { client.newCall(submitReq).execute() }.getOrElse {
             return relayError(stubUrl, 502, "submit_failed", "任务提交失败: ${it.message}")
@@ -103,15 +99,16 @@ object ModelScopeImageClient {
         if (taskId.isBlank()) {
             return relayError(stubUrl, 502, "missing_task_id", "任务提交响应缺 task_id: ${submitText.take(200)}")
         }
-        LogStore.i("ModelScope", "提交成功 task_id=$taskId (${taskType})")
+        LogStore.i("ModelScope", "提交成功 task_id=$taskId (image)")
 
-        // 2) 轮询到完成（生图一般 20-90s，留足余量）
-        val deadline = System.currentTimeMillis() + if (isVideo) 15 * 60_000L else 4 * 60_000L
+        // 2) 轮询到完成（对齐墨🐳：5 秒间隔，10 分钟上限）
+        val deadline = System.currentTimeMillis() + 10 * 60_000L
         val pollReq = Request.Builder().url("$root/tasks/$taskId")
             .header("Authorization", "Bearer $apiKey")
+            .header("X-ModelScope-Task-Type", "image_generation")
             .build()
         while (System.currentTimeMillis() < deadline) {
-            Thread.sleep(3_000)
+            Thread.sleep(5_000)
             val resp = runCatching { client.newCall(pollReq).execute() }.getOrElse { continue }
             val text = resp.body?.string().orEmpty().also { resp.close() }
             if (!resp.isSuccessful) continue
