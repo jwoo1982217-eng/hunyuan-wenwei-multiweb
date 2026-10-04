@@ -276,11 +276,26 @@ object CustomWebChatAutomation {
         }
     }
 
-    suspend fun chat(config: CustomWebProviderConfig, messages: List<ChatMessage>, onUpdate: suspend (String) -> Unit): String = lock.withLock {
+    suspend fun chat(
+        config: CustomWebProviderConfig,
+        messages: List<ChatMessage>,
+        wantedModel: String? = null,
+        onUpdate: suspend (String) -> Unit,
+    ): String = lock.withLock {
         val (view, _) = awaitAttached(config)
         checkArenaGuestBlocker(view, config)
         ensureArenaTextMode(view, config)
         checkArenaGuestBlocker(view, config)
+        // arena-t-* 指定模型：在 /text/direct 页的模型选择器里切到目标模型
+        // （对齐墨🐳 ensureArenaModelPicked 的键盘流；失败不阻断，用页面默认模型）
+        if (isArenaGuestWebConfig(config) && !wantedModel.isNullOrBlank()) {
+            val picked = runCatching { CustomWebImageAutomation.selectArenaModel(view, wantedModel) }
+                .onFailure { LogStore.w("CustomWebChat", "Arena 模型切换异常：${it.message}") }
+                .getOrDefault(false)
+            LogStore.i("CustomWebChat", "Arena 模型选择 $wantedModel：${if (picked) "已选中" else "未确认，使用页面默认模型"}")
+        }
+        // 文心/华为云等自定义网页的页内模型点选（移植自墨🐳 WebPageModelSelector）
+        WebPageModelSelector.applyIfPending(view)
         // 确保聊天输入框就绪（豆包等网页默认停在列表/首页，没有输入框时会
         // 误选搜索框导致发送失败）。等待输入框出现，必要时点"新对话"。
         ensureChatInputReady(view, config)
@@ -337,9 +352,10 @@ object CustomWebChatAutomation {
             textMessages.joinToString("\n\n") { "[${it.role}]: ${it.textContent()}" }
         }
         // LongCat 的真实 AI 回复容器稳定为 .v-chat-assistant-message；不依赖旧保存配置。
+        // 文心/华为云等已知站点用内置选择器兜底（墨🐳 WebPageModelSelector 移植）。
         val effectiveResponseSelector = if (config.loginUrl.contains("longcat.chat", ignoreCase = true)) {
             ".v-chat-assistant-message"
-        } else config.responseSelector
+        } else WebPageModelSelector.resolveResponseSelector(config.loginUrl, config.responseSelector)
         val response = JSONObject.quote(effectiveResponseSelector)
         val text = JSONObject.quote(prompt)
         val arenaGuest = isArenaGuestWebConfig(config)
@@ -1428,7 +1444,8 @@ object CustomWebImageAutomation {
      *
      * @return true=选择器文本已变成目标模型；false=未能确认（调用方回退页面默认模型）
      */
-    private suspend fun selectArenaModel(view: WebView, modelId: String): Boolean {
+    // internal：聊天自动化也要在 /text/direct 页切 arena-t-* 模型（同一套选择器 DOM）
+    internal suspend fun selectArenaModel(view: WebView, modelId: String): Boolean {
         val tapPicker = evaluate(view, """
             (()=>{const b=[...document.querySelectorAll('button[aria-haspopup="dialog"]')]
               .find(b=>b.offsetParent!==null&&!b.getAttribute('aria-label')&&(b.innerText||'').trim());

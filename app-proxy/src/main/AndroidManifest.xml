@@ -9,6 +9,7 @@
     <uses-permission
         android:name="android.permission.WRITE_EXTERNAL_STORAGE"
         android:maxSdkVersion="28" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
     <application
         android:allowBackup="true"
@@ -20,6 +21,15 @@
             android:name=".ProxyService"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
+        <!-- 下拉快捷开关：一键启停本地网关（墨🐳 GatewayTileService 移植） -->
+        <service
+            android:name=".GatewayTileService"
+            android:exported="true"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILES">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
+        </service>
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.fileprovider"

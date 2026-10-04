@@ -340,9 +340,11 @@ class ProxyViewModel(app: Application) : AndroidViewModel(app) {
                 )
             } else listOf(primary)
         }
-        providerModels.value = (webModels.value + customModels + buildApiModels(apiProviders.value) +
-            buildPlainModelAliases(apiProviders.value) + buildAutoModels(apiProviders.value))
-            .distinctBy { it.publicModelId }
+        // 文心/华为云等自定义网页主模型展开为 `主模型--短名` 变体（墨🐳 WebPageModelSelector 移植）
+        providerModels.value = com.wenwei.deepseekproxy.proxy.WebPageModelSelector.expandModels(
+            webModels.value + customModels + buildApiModels(apiProviders.value) +
+                buildPlainModelAliases(apiProviders.value) + buildAutoModels(apiProviders.value)
+        ).distinctBy { it.publicModelId }
         ProviderCatalog.setRuntimeModels(providerModels.value)
     }
 

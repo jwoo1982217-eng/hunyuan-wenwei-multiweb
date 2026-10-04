@@ -307,6 +307,29 @@ object ProxyServer {
                     if (!call.requireLocalGatewayAuth()) return@get
                     call.respond(currentStatus())
                 }
+                // 配置迁移接口（墨🐳 AdminMigration 移植）：整包导出/导入接口与
+                // 自定义 Web 供应商。导出含明文密钥，必须带本地网关 Bearer。
+                get("/admin/export") {
+                    if (!call.requireLocalGatewayAuth()) return@get
+                    call.respondText(
+                        AdminMigration.exportJson(),
+                        ContentType.Application.Json
+                    )
+                }
+                post("/admin/import-api") {
+                    if (!call.requireLocalGatewayAuth()) return@post
+                    call.respondText(
+                        AdminMigration.importApi(call.receiveText()),
+                        ContentType.Application.Json
+                    )
+                }
+                post("/admin/import-web") {
+                    if (!call.requireLocalGatewayAuth()) return@post
+                    call.respondText(
+                        AdminMigration.importWeb(call.receiveText()),
+                        ContentType.Application.Json
+                    )
+                }
                 suspend fun ApplicationCall.respondModelList() {
                     if (!requireLocalGatewayAuth()) return
                     // 同时兼容 OpenAI 标准 /v1/models 与部分客户端使用的 /models。
@@ -998,10 +1021,16 @@ object ProxyServer {
     ) {
         android.util.Log.i("BrowserRelayRoute", "进入浏览器中转: provider=${model.providerType}, model=${model.publicModelId}, attachments=${req.messages.sumOf { it.attachments().size }}")
         val config = builtInBrowserRelayConfig(model.providerType)
+        // arena-t-* / 文心·华为云变体：把目标模型带给自动化（页内点选）
+        WebPageModelSelector.setPending(model)
         respondProviderText(req, completionId, created) { emit ->
             var previous = ""
             try {
-                CustomWebChatAutomation.chat(config, req.messages) { complete ->
+                CustomWebChatAutomation.chat(
+                    config, req.messages,
+                    wantedModel = model.upstreamModelId
+                        .takeIf { it.isNotBlank() && model.publicModelId.startsWith("arena-t-") }
+                ) { complete ->
                     val delta = if (complete.startsWith(previous)) complete.removePrefix(previous) else complete
                     previous = complete
                     if (delta.isNotEmpty()) emit(delta)
@@ -1579,8 +1608,14 @@ object ProxyServer {
                 for (config in candidates) {
                     val startedAt = System.nanoTime()
                     try {
+                        // 魔搭（baseUrl 含 modelscope）走异步任务适配：
+                        // /images/generations → tasks 提交+轮询 → OpenAI 响应形态
                         val attempt = withContext(Dispatchers.IO) {
-                            OpenAiCompatibleClient.executeImage(config, registered.upstreamModelId, raw)
+                            if (ModelScopeImageClient.matches(config)) {
+                                ModelScopeImageClient.generate(config, registered.upstreamModelId, raw)
+                            } else {
+                                OpenAiCompatibleClient.executeImage(config, registered.upstreamModelId, raw)
+                            }
                         }
                         val latency = (System.nanoTime() - startedAt) / 1_000_000
                         val retryable = attempt.code == 429 || attempt.code >= 500

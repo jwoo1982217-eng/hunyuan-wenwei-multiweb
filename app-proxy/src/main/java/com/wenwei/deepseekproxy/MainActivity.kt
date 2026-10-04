@@ -513,6 +513,48 @@ fun ApiProviderScreen(
             Button(onClick = { creating = true }) { Text("＋ 添加") }
         }
         AutoClawLoginCard(onOpenLogin = { showAutoClawLogin = true })
+        // ── 配置备份/恢复（墨🐳 ProviderBackup 移植）：整包导出到 Download/，从文件合并恢复 ──
+        val backupContext = LocalContext.current
+        var pendingRestore by remember { mutableStateOf<Uri?>(null) }
+        var restoreCounts by remember { mutableStateOf("") }
+        val pickBackup = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+            if (uri != null) {
+                val (apiCount, webCount, err) = com.wenwei.deepseekproxy.proxy.ProviderBackup.preview(backupContext, uri)
+                if (err.isNotBlank()) {
+                    Toast.makeText(backupContext, err, Toast.LENGTH_LONG).show()
+                } else {
+                    pendingRestore = uri
+                    restoreCounts = "接口 $apiCount 个 · 自定义 Web $webCount 个"
+                }
+            }
+        }
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            TextButton(onClick = {
+                val (_, ok, msg) = com.wenwei.deepseekproxy.proxy.ProviderBackup.exportToDownload(backupContext)
+                Toast.makeText(backupContext, if (ok) "已备份到 Download/" else msg, Toast.LENGTH_LONG).show()
+            }) { Text("备份到下载") }
+            TextButton(onClick = {
+                pickBackup.launch(arrayOf("application/json", "text/*"))
+            }) { Text("从文件恢复") }
+        }
+        pendingRestore?.let { uri ->
+            AlertDialog(
+                onDismissRequest = { pendingRestore = null },
+                title = { Text("恢复备份") },
+                text = { Text("将合并导入 $restoreCounts，与现有配置按 id 去重，继续吗？") },
+                confirmButton = {
+                    TextButton(onClick = {
+                        Toast.makeText(
+                            backupContext,
+                            com.wenwei.deepseekproxy.proxy.ProviderBackup.restore(backupContext, uri),
+                            Toast.LENGTH_LONG
+                        ).show()
+                        pendingRestore = null
+                    }) { Text("恢复") }
+                },
+                dismissButton = { TextButton(onClick = { pendingRestore = null }) { Text("取消") } }
+            )
+        }
         if (providers.isEmpty()) {
             ElevatedCard(Modifier.fillMaxWidth()) {
                 Text("还没有自定义接口。点击“添加”，填写接口地址和 API Key，应用会自动发现模型。", Modifier.padding(16.dp))

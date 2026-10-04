@@ -336,7 +336,8 @@ object ProviderCatalog {
             upstreamModelId = "deep_research",
         ),
         // WorkBuddy 国内/国际版各 16 个模型由 WorkBuddyModelCatalog 展开（对照精排小说调用契约）
-    ) + WorkBuddyModelCatalog.providerModels() + ArenaImageModels.providerModels() + AppBmsImageClient.MODELS.map { m ->
+    ) + WorkBuddyModelCatalog.providerModels() + ArenaImageModels.providerModels() +
+        ArenaChatModels.providerModels() + AppBmsImageClient.MODELS.map { m ->
         // AppBMS 46 个生图模型：手机流量/住宅宽带直连上游（上游封机房 IP），无需登录
         ProviderModel(
             "bms-$m",
@@ -420,6 +421,8 @@ object ProviderCatalog {
     fun find(publicModelId: String): ProviderModel? = enabledModels.firstOrNull {
         it.publicModelId.equals(publicModelId, ignoreCase = true)
     }
+
+    fun runtimeModelsSnapshot(): List<ProviderModel> = runtimeModels
 
     fun setRuntimeModels(models: List<ProviderModel>) {
         runtimeModels = models.distinctBy { it.publicModelId }
