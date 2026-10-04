@@ -33,6 +33,7 @@ class ProxyService : android.app.Service() {
         super.onCreate()
         WorkBuddyCredentialStore.attach(this)
         com.wenwei.deepseekproxy.proxy.AdminMigration.attach(this)
+        com.wenwei.deepseekproxy.proxy.DirectNetwork.init(this)
         createChannel()
         runCatching {
             assets.open("sha3_wasm_bg.wasm").use { DeepSeekPowWebView.init(this, it.readBytes()) }

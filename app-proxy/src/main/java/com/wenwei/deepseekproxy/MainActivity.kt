@@ -293,6 +293,9 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun App(vm: ProxyViewModel) {
     val context = LocalContext.current
+    androidx.compose.runtime.LaunchedEffect(Unit) {
+        com.wenwei.deepseekproxy.proxy.DirectNetwork.init(context)
+    }
     val cookiesFlow by vm.cookies.collectAsState()
     val selectedIdx by vm.selectedIndex.collectAsState()
     val modelFlow by vm.chatModel.collectAsState()
@@ -2722,6 +2725,19 @@ fun BrowserScreen(
     var pendingGeminiValidationSessionId by remember { mutableStateOf<String?>(null) }
     // 「重置当前登录」时置位：下个该供应商页面加载完成后清 localStorage/sessionStorage
     var pendingStorageWipe by remember { mutableStateOf(false) }
+    // 国内供应商页面自动绕过 VPN（额度按出口 IP 记账，VPN 共享出口会被上游拒绝/限额）；
+    // 海外页面（ChatGPT/Gemini/Perplexity 等）恢复默认走 VPN。离开浏览器页自动还原。
+    val domesticWebProvider = provider in setOf(
+        WebProviderType.BAILIAN, WebProviderType.DOUBAO_WEB, WebProviderType.KIMI_WEB,
+        WebProviderType.DEEPSEEK_WEB, WebProviderType.QWEN_WEB, WebProviderType.QWEN_AI_WEB,
+        WebProviderType.ZHIPU_GUEST, WebProviderType.ZHIPU_WEB, WebProviderType.ZAI_WEB,
+        WebProviderType.MIMO_WEB, WebProviderType.MINIMAX_WEB, WebProviderType.CNB,
+        WebProviderType.WORKBUDDY_DOMESTIC,
+    )
+    androidx.compose.runtime.DisposableEffect(domesticWebProvider) {
+        com.wenwei.deepseekproxy.proxy.DirectNetwork.bindProcess(domesticWebProvider)
+        onDispose { com.wenwei.deepseekproxy.proxy.DirectNetwork.bindProcess(false) }
+    }
     // 会话列表折叠状态（默认收起，省浏览器页纵向空间）
     var sessionsExpanded by remember { mutableStateOf(false) }
     // 用户是否碰过 WebView（碰过就不自动关豆包引导弹窗；页面开始加载时重置）

@@ -62,13 +62,15 @@ object AutoClawClient {
     @Volatile var refreshToken: String = ""
     @Volatile var deviceId: String = UUID.randomUUID().toString()
 
-    private val client = OkHttpClient.Builder()
-        .connectTimeout(20, TimeUnit.SECONDS)
-        .readTimeout(300, TimeUnit.SECONDS)  // 深度思考可能很长
-        // 强制 HTTP/1.1：上游对 OkHttp 协商的 HTTP/2 多路复用会话处理不稳
-        // （2026-10-03 手机端 500 parse response failed 排查；curl h1/h2 均通，仅 OkHttp 失败）
-        .protocols(listOf(okhttp3.Protocol.HTTP_1_1))
-        .build()
+    // 国内上游：恒走直连（绕过 VPN——海外 IP 刷出的 token 会被聊天端点拒收）
+    private val client = DirectNetwork.apply(
+        OkHttpClient.Builder()
+            .connectTimeout(20, TimeUnit.SECONDS)
+            .readTimeout(300, TimeUnit.SECONDS)  // 深度思考可能很长
+            // 强制 HTTP/1.1：上游对 OkHttp 协商的 HTTP/2 多路复用会话处理不稳
+            // （2026-10-03 手机端 500 parse response failed 排查；curl h1/h2 均通，仅 OkHttp 失败）
+            .protocols(listOf(okhttp3.Protocol.HTTP_1_1))
+    ).build()
 
     fun isConfigured(): Boolean = accessToken.isNotBlank()
 

@@ -58,10 +58,12 @@ object BailianClient {
         "Mozilla/5.0 (Linux; Android 15; V2352A Build/AP3A.240905.015.A2) AppleWebKit/537.36 " +
             "(KHTML, like Gecko) Chrome/126.0.6478.71 Mobile Safari/537.36"
 
-    private val client = OkHttpClient.Builder()
-        .connectTimeout(20, TimeUnit.SECONDS)
-        .readTimeout(180, TimeUnit.SECONDS)
-        .build()
+    // 国内上游按出口 IP 记额度：恒走直连（绕过 VPN），物理网不可用自动回落默认
+    private val client = DirectNetwork.apply(
+        OkHttpClient.Builder()
+            .connectTimeout(20, TimeUnit.SECONDS)
+            .readTimeout(180, TimeUnit.SECONDS)
+    ).build()
 
     fun applyConfig(json: String) {
         if (json.isBlank()) {
