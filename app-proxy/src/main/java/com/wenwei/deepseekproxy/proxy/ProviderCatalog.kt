@@ -94,7 +94,17 @@ enum class WebProviderType(
     OPENAI_COMPATIBLE("API 接口", null, emptyList()),
     APPBMS("AppBMS 生图", null, emptyList()),
     NANOAI_VIDEO("NanoAI 视频", null, emptyList()),
-    BAILIAN("百炼", null, emptyList()),
+    // 百炼模型体验页（匿名游客对话）。列入浏览器下拉（supportsWebLogin），
+    // cookieOrigins 供「重置当前登录」清旧游客会话换新额度。
+    BAILIAN(
+        "百炼",
+        "https://bailian.console.aliyun.com/cn-beijing/model/experience/llm",
+        listOf(
+            "https://bailian.console.aliyun.com",
+            "https://bailian-cs.console.aliyun.com",
+            "https://bailian-stream-api.aliyuncs.com",
+        )
+    ),
     MINIMAX_H3("MiniMax H3 视频", null, emptyList()),
     AUTOCLAW("AutoClaw 积分", null, emptyList()),
     ZHIPU_WEB(

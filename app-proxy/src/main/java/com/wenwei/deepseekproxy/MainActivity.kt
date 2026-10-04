@@ -398,11 +398,16 @@ fun App(vm: ProxyViewModel) {
                     onRelayReady = vm::ensureServerStarted,
                     onBailianCaptured = { json ->
                         val (slot, total) = vm.applyBailianConfig(json)
-                        Toast.makeText(
-                            context,
-                            "✅ 已捕获百炼凭证，写入槽位 $slot/$total（设置页可管理）",
-                            Toast.LENGTH_LONG
-                        ).show()
+                        // shouldInterceptRequest 跑在 WebView IO 线程，Toast 必须回主线程
+                        android.os.Handler(android.os.Looper.getMainLooper()).post {
+                            runCatching {
+                                Toast.makeText(
+                                    context,
+                                    "✅ 已捕获百炼凭证，写入槽位 $slot/$total（设置页可管理）",
+                                    Toast.LENGTH_LONG
+                                ).show()
+                            }
+                        }
                     },
                     modifier = Modifier.fillMaxSize()
                 )
@@ -859,7 +864,7 @@ private fun BailianPoolRow(vm: ProxyViewModel) {
         }
     }
     Text(
-        "每套额度独立：去浏览器点「百炼」并在体验页发一条消息，捕获会写入当前选中的槽位；聊天时自动轮换全部套",
+        "每套额度独立：浏览器页选「百炼」并体验页发一条消息，捕获写入当前选中的槽位；聊天时自动轮换全部套",
         style = MaterialTheme.typography.bodySmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant
     )
@@ -3002,7 +3007,12 @@ fun BrowserScreen(
                 )
             }
             Spacer(Modifier.width(8.dp))
-            if (provider == WebProviderType.RAPHAEL_WEB) {
+            if (provider == WebProviderType.BAILIAN) {
+                Text(
+                    "发一条消息即自动捕获凭证 → 写入设置页选中的百炼槽位；额度用完点「重置当前登录」换新游客身份",
+                    modifier = Modifier.weight(2f)
+                )
+            } else if (provider == WebProviderType.RAPHAEL_WEB) {
                 Text("免登录免费基础生图", modifier = Modifier.weight(1f))
             } else if (provider == WebProviderType.ARENA_GUEST) {
                 Text("免登录游客对话，首次需同意网页条款", modifier = Modifier.weight(1f))
@@ -3038,32 +3048,7 @@ fun BrowserScreen(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(6.dp)
         ) {
-            OutlinedButton(onClick = {
-                // 额度绑 Cookie（BailianClient 注释的做法）：先清掉百炼域的旧会话，
-                // 再访问即得新游客额度；旧 Cookie 额度耗尽时上游报
-                // BenchmarkPlatform.IllegalPermission.Error，重置即恢复。
-                runCatching {
-                    val cm = CookieManager.getInstance()
-                    cm.flush()
-                    for (origin in listOf(
-                        "https://bailian.console.aliyun.com",
-                        "https://bailian-cs.console.aliyun.com",
-                        "https://bailian-stream-api.aliyuncs.com",
-                    )) {
-                        cm.getCookie(origin)?.split(";")?.forEach { c ->
-                            val name = c.trim().substringBefore("=")
-                            if (name.isNotBlank()) {
-                                cm.setCookie(origin, "$name=; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Path=/")
-                            }
-                        }
-                    }
-                    cm.flush()
-                }
-                pendingStorageWipe = true
-                val u = "https://bailian.console.aliyun.com/cn-beijing/model/experience/llm"
-                url = u
-                webViewRef.value?.loadUrl(u)
-            }) { Text("百炼") }
+
             Spacer(Modifier.width(8.dp))
             if (provider == WebProviderType.RAPHAEL_WEB) {
                 Text("打开页面后即可通过 raphael-image-web 调用", modifier = Modifier.weight(2f))
@@ -3071,7 +3056,7 @@ fun BrowserScreen(
                 Text("首次点 Agree 后即可通过 arena-guest-web 调用", modifier = Modifier.weight(2f))
             } else if (provider == WebProviderType.CUSTOM_WEB) {
                 Text("登录后直接在中转选择 ${activeCustom?.modelId.orEmpty()} 调用")
-            } else Button(onClick = {
+            } else if (provider != WebProviderType.BAILIAN) Button(onClick = {
                 val cm = CookieManager.getInstance()
                 cm.flush()
                 val cookies = WebCookieSnapshot.merge(provider.cookieOrigins.map { origin ->

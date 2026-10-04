@@ -132,17 +132,26 @@ class ProxyViewModel(app: Application) : AndroidViewModel(app) {
         syncBailianRuntime()
     }
 
-    /** 浏览器捕获到新凭证：写入当前选中槽位。返回 (槽位, 总数) 供 UI 提示 */
+    /** 同一游客身份去重键（体验页每个请求都会触发捕获，只有 Cookie 变了才是新身份） */
+    @Volatile private var lastBailianCookieKey: String = ""
+
+    /** 浏览器捕获到新凭证：写入当前选中槽位。返回 (槽位, 总数)；重复身份返回 (当前, 总数) 且不写池 */
     fun applyBailianConfig(json: String): Pair<Int, Int> {
         loadBailianPool()
-        val list = bailianConfigs.value.toMutableList()
-        val idx = if (list.isEmpty()) 0 else bailianSelectedIndex.value.coerceIn(0, list.size - 1)
-        if (list.isEmpty()) list.add(json) else list[idx] = json
-        bailianConfigs.value = list
-        bailianSelectedIndex.value = idx
+        val list = bailianConfigs.value.ifEmpty { listOf(json) }
+        val idx = bailianSelectedIndex.value.coerceIn(0, list.size - 1)
+        val cookieKey = runCatching { JSONObject(json).optString("cookies") }.getOrDefault("")
+        if (cookieKey.isNotBlank() && cookieKey == lastBailianCookieKey) {
+            return (idx + 1) to list.size
+        }
+        if (!runCatching { JSONObject(json).has("bx_ua") }.getOrDefault(false)) {
+            return (idx + 1) to list.size  // 捕获不完整（缺 bx 三件套），不覆盖好凭证
+        }
+        lastBailianCookieKey = cookieKey
         lastBailianJson = json
+        bailianConfigs.value = list.toMutableList().also { it[idx] = json }
         com.wenwei.deepseekproxy.proxy.BailianClient.applyConfig(json)
-        com.wenwei.deepseekproxy.proxy.BailianClient.setConfigList(list)
+        com.wenwei.deepseekproxy.proxy.BailianClient.setConfigList(bailianConfigs.value)
         persistBailianPool()
         LogStore.i("Bailian", "百炼凭证已捕获写入槽位 ${idx + 1}/${list.size}")
         return (idx + 1) to list.size
