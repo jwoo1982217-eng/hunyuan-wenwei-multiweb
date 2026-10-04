@@ -2986,6 +2986,27 @@ fun BrowserScreen(
             Button(onClick = { webViewRef.value?.loadUrl(url) }) { Text("前往") }
             Spacer(Modifier.width(4.dp))
             OutlinedButton(onClick = {
+                // 额度绑 Cookie（BailianClient 注释的做法）：先清掉百炼域的旧会话，
+                // 再访问即得新游客额度；旧 Cookie 额度耗尽时上游报
+                // BenchmarkPlatform.IllegalPermission.Error，重置即恢复。
+                runCatching {
+                    val cm = CookieManager.getInstance()
+                    cm.flush()
+                    for (origin in listOf(
+                        "https://bailian.console.aliyun.com",
+                        "https://bailian-cs.console.aliyun.com",
+                        "https://bailian-stream-api.aliyuncs.com",
+                    )) {
+                        cm.getCookie(origin)?.split(";")?.forEach { c ->
+                            val name = c.trim().substringBefore("=")
+                            if (name.isNotBlank()) {
+                                cm.setCookie(origin, "$name=; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Path=/")
+                            }
+                        }
+                    }
+                    cm.flush()
+                }
+                pendingStorageWipe = true
                 val u = "https://bailian.console.aliyun.com/cn-beijing/model/experience/llm"
                 url = u
                 webViewRef.value?.loadUrl(u)
