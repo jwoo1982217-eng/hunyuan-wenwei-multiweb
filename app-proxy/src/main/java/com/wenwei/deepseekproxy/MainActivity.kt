@@ -292,6 +292,7 @@ class MainActivity : ComponentActivity() {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun App(vm: ProxyViewModel) {
+    val context = LocalContext.current
     val cookiesFlow by vm.cookies.collectAsState()
     val selectedIdx by vm.selectedIndex.collectAsState()
     val modelFlow by vm.chatModel.collectAsState()
@@ -395,7 +396,14 @@ fun App(vm: ProxyViewModel) {
                     onCustomProviderSaved = vm::saveCustomWebProvider,
                     onCustomProviderDeleted = vm::deleteCustomWebProvider,
                     onRelayReady = vm::ensureServerStarted,
-                    onBailianCaptured = { json -> vm.applyBailianConfig(json) },
+                    onBailianCaptured = { json ->
+                        val (slot, total) = vm.applyBailianConfig(json)
+                        Toast.makeText(
+                            context,
+                            "✅ 已捕获百炼凭证，写入槽位 $slot/$total（设置页可管理）",
+                            Toast.LENGTH_LONG
+                        ).show()
+                    },
                     modifier = Modifier.fillMaxSize()
                 )
                 if (tab == 0) {
@@ -3023,7 +3031,13 @@ fun BrowserScreen(
             )
             Spacer(Modifier.width(6.dp))
             Button(onClick = { webViewRef.value?.loadUrl(url) }) { Text("前往") }
-            Spacer(Modifier.width(4.dp))
+        }
+        // 第二行：百炼/保存会话/重置——与网址栏分行，避免小屏挤到和上方供应商下拉重叠
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 2.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
             OutlinedButton(onClick = {
                 // 额度绑 Cookie（BailianClient 注释的做法）：先清掉百炼域的旧会话，
                 // 再访问即得新游客额度；旧 Cookie 额度耗尽时上游报

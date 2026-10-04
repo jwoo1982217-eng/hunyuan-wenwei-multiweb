@@ -132,12 +132,11 @@ class ProxyViewModel(app: Application) : AndroidViewModel(app) {
         syncBailianRuntime()
     }
 
-    /** 浏览器捕获到新凭证：写入当前选中槽位（Z·阅读 setBailianFromRequest 同款语义） */
-    fun applyBailianConfig(json: String) {
-        if (json.isBlank()) return
+    /** 浏览器捕获到新凭证：写入当前选中槽位。返回 (槽位, 总数) 供 UI 提示 */
+    fun applyBailianConfig(json: String): Pair<Int, Int> {
         loadBailianPool()
         val list = bailianConfigs.value.toMutableList()
-        val idx = bailianSelectedIndex.value.coerceIn(0, (list.size - 1).coerceAtLeast(0))
+        val idx = if (list.isEmpty()) 0 else bailianSelectedIndex.value.coerceIn(0, list.size - 1)
         if (list.isEmpty()) list.add(json) else list[idx] = json
         bailianConfigs.value = list
         bailianSelectedIndex.value = idx
@@ -146,6 +145,7 @@ class ProxyViewModel(app: Application) : AndroidViewModel(app) {
         com.wenwei.deepseekproxy.proxy.BailianClient.setConfigList(list)
         persistBailianPool()
         LogStore.i("Bailian", "百炼凭证已捕获写入槽位 ${idx + 1}/${list.size}")
+        return (idx + 1) to list.size
     }
 
     fun addBailianConfig() {
