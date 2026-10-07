@@ -134,6 +134,39 @@ class ProviderCatalogTest {
         assertEquals("https://raphael.app/zh", WebProviderType.RAPHAEL_WEB.loginUrl)
     }
 
+    @Test fun picaiUnlimitedImageModelIsExposedOnlyAsImage() {
+        val model = requireNotNull(ProviderCatalog.find("picai-gpt-image-2"))
+        assertEquals(WebProviderType.PICAI, model.providerType)
+        assertEquals("gpt-image-2", model.upstreamModelId)
+        assertEquals(setOf(ProviderCapability.IMAGE_GENERATION), model.capabilities)
+        assertTrue(ProviderCatalog.imageModels.any { it.publicModelId == "picai-gpt-image-2" })
+        assertFalse(ProviderCatalog.chatModels.any { it.publicModelId == "picai-gpt-image-2" })
+        // 免登录供应商：不进浏览器登录下拉
+        assertNull(WebProviderType.PICAI.loginUrl)
+    }
+
+    @Test fun picaiMintedIdentityIpIsPublicAndRatioMapMatchesUpstream() {
+        repeat(200) {
+            val ip = PicaiImageClient.mintIp()
+            val parts = ip.split('.')
+            assertEquals(4, parts.size)
+            assertTrue(parts.all { p -> p.toInt() in 0..255 })
+            // 回环/私有/保留/CGNAT/基准测试段不得出现（与 picai-relay 排除表一致）
+            assertFalse(ip.startsWith("10.") || ip.startsWith("127."))
+            assertFalse(ip.startsWith("172.16.") || ip.startsWith("172.17.") ||
+                ip.startsWith("172.31.") || ip.startsWith("192.168."))
+            assertFalse(ip.startsWith("169.254.") || ip.startsWith("192.0.") ||
+                ip.startsWith("100.64.") || ip.startsWith("100.127.") ||
+                ip.startsWith("198.18.") || ip.startsWith("198.19."))
+        }
+        // 与 2026-10-08 实测通过的提交体一一对应
+        assertEquals(PicaiImageClient.PicaiSize("square_hd", 1024, 1024), PicaiImageClient.RATIO_MAP["1:1"])
+        assertEquals(PicaiImageClient.PicaiSize("portrait_16_9", 576, 1024), PicaiImageClient.RATIO_MAP["9:16"])
+        assertEquals(PicaiImageClient.PicaiSize("landscape_16_9", 1024, 576), PicaiImageClient.RATIO_MAP["16:9"])
+        assertEquals(PicaiImageClient.PicaiSize("landscape_4_3", 1152, 864), PicaiImageClient.RATIO_MAP["4:3"])
+        assertEquals(PicaiImageClient.PicaiSize("portrait_4_3", 864, 1152), PicaiImageClient.RATIO_MAP["3:4"])
+    }
+
     @Test fun geminiImageInstructionKeepsPromptAndRatio() {
         val instruction = buildGeminiImageInstruction("画一朵玫瑰", "9:16")
         assertTrue(instruction.contains("画一朵玫瑰"))

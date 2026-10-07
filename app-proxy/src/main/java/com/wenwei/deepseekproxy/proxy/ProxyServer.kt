@@ -1718,6 +1718,28 @@ object ProxyServer {
                 }
                 return
             }
+            if (registered.providerType == WebProviderType.PICAI) {
+                try {
+                    val ratio = resolveRatio(if (size.isNotBlank()) size else defaultImageSize)
+                    val urls = withContext(Dispatchers.IO) {
+                        PicaiImageClient.generateImage(prompt, ratio, registered.upstreamModelId)
+                    }
+                    if (urls.isEmpty()) {
+                        call.respond(HttpStatusCode.BadGateway, mapOf("error" to "PicAI 生图未返回图片"))
+                    } else {
+                        call.respond(ImageGenResponse(
+                            created = (System.currentTimeMillis() / 1000).toInt(),
+                            data = urls.map(::ImageDataItem),
+                        ))
+                    }
+                } catch (e: Exception) {
+                    LogStore.e("PicaiImage", e.stackTraceToString())
+                    call.respond(HttpStatusCode.BadGateway, mapOf(
+                        "error" to (e.localizedMessage ?: "PicAI 生图失败")
+                    ))
+                }
+                return
+            }
             if (registered.providerType == WebProviderType.ZHIPU_GUEST) {
                 try {
                     val ratio = resolveRatio(if (size.isNotBlank()) size else defaultImageSize)

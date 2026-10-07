@@ -95,6 +95,9 @@ enum class WebProviderType(
     ),
     OPENAI_COMPATIBLE("API 接口", null, emptyList()),
     APPBMS("AppBMS 生图", null, emptyList()),
+    // PicAI 生图（picai.com 匿名游客额度按 XFF 头 IP 记账，每图现编新身份=额度无限刷新，
+    // 2026-10-08 对照实验实测验证），无需登录
+    PICAI("PicAI 生图", null, emptyList()),
     NANOAI_VIDEO("NanoAI 视频", null, emptyList()),
     // 百炼模型体验页（匿名游客对话）。列入浏览器下拉（supportsWebLogin），
     // cookieOrigins 供「重置当前登录」清旧游客会话换新额度。
@@ -365,6 +368,17 @@ object ProviderCatalog {
             "bms-$m",
             m,
             WebProviderType.APPBMS,
+            setOf(ProviderCapability.IMAGE_GENERATION),
+            enabled = true,
+            upstreamModelId = m,
+        )
+    } + PicaiImageClient.MODELS.map { m ->
+        // PicAI 1 个生图模型：picai- 前缀避免与 bms-gpt-image-2 撞名；
+        // 手机流量/住宅宽带直连上游（每图新随机 XFF 身份），无需登录
+        ProviderModel(
+            "picai-$m",
+            m,
+            WebProviderType.PICAI,
             setOf(ProviderCapability.IMAGE_GENERATION),
             enabled = true,
             upstreamModelId = m,
