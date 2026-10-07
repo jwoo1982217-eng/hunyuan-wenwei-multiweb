@@ -1,3 +1,4 @@
+.wrangler/
 .gradle/
 build/
 **/build/
@@ -5,4 +6,4 @@ local.properties
 *.iml
 .idea/
 
-.wrangler/
+picai_relay_key.txt

@@ -96,7 +96,7 @@ JAVA_HOME="/Applications/Android Studio.app/Contents/jbr/Contents/Home" \
 
 - 代码：`tools/picai-worker/`（wrangler 项目），自定义域 **`picai.applecabal.us.ci`**
 - 端点：`https://picai.applecabal.us.ci/v1`（OpenAI 兼容；`POST /v1/images/generations`、`GET /v1/models`、`GET /health`、`GET /__probe` 排障探针）
-- 鉴权：`Authorization: Bearer <RELAY_KEY>`；KEY 备份在 `~/Downloads/picai_relay_key.txt`，轮换用 `npx wrangler secret put RELAY_KEY`
+- 鉴权：`Authorization: Bearer <RELAY_KEY>`；KEY 备份在工程根目录 `picai_relay_key.txt`（已 gitignore，不入库），轮换用 `npx wrangler secret put RELAY_KEY`
 - 部署/更新：`cd tools/picai-worker && npx wrangler deploy`（授权用 `npx wrangler login`）
 - 实测：Worker 出口连续 3 张全成功（9:16/4:3/1:1，14~17s/张）；探针显示 CF 出口侧"新会话=新额度"，XFF 是否透传不影响可用性（比照直连侧更宽松）
 - 客户端接入：App「接口」页新增自定义供应商，baseUrl 填 `https://picai.applecabal.us.ci/v1`，imageModels 加 `gpt-image-2`
