@@ -1,0 +1,13 @@
+name = "picai-relay"
+main = "src/worker.js"
+compatibility_date = "2026-06-29"
+workers_dev = false
+preview_urls = false
+
+# 自定义域：自动在 applecabal.us.ci 区建 DNS + 路由
+routes = [
+  { pattern = "picai.applecabal.us.ci", custom_domain = true }
+]
+
+[vars]
+UPSTREAM = "https://picai.com"

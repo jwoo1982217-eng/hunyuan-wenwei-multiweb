@@ -1,0 +1,5 @@
+{
+  "name": "picai-relay-worker",
+  "private": true,
+  "scripts": { "deploy": "wrangler deploy", "dev": "wrangler dev" }
+}
