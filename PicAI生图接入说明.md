@@ -91,3 +91,13 @@ JAVA_HOME="/Applications/Android Studio.app/Contents/jbr/Contents/Home" \
 
 - `ProviderCatalogTest`：34 项全绿（含 picai 模型暴露形态 + mintIp 排除表 + 比例映射契约）。
 - 额度机制对照实验可复现：`python3 tools/test/probe_picai_quota.py`（注意：A1/B1 两个实验组会真实消耗上游两次生图）。
+
+## 公网部署（2026-10-08，Cloudflare Worker）
+
+- 代码：`tools/picai-worker/`（wrangler 项目），自定义域 **`picai.applecabal.us.ci`**
+- 端点：`https://picai.applecabal.us.ci/v1`（OpenAI 兼容；`POST /v1/images/generations`、`GET /v1/models`、`GET /health`、`GET /__probe` 排障探针）
+- 鉴权：`Authorization: Bearer <RELAY_KEY>`；KEY 备份在 `~/Downloads/picai_relay_key.txt`，轮换用 `npx wrangler secret put RELAY_KEY`
+- 部署/更新：`cd tools/picai-worker && npx wrangler deploy`（授权用 `npx wrangler login`）
+- 实测：Worker 出口连续 3 张全成功（9:16/4:3/1:1，14~17s/张）；探针显示 CF 出口侧"新会话=新额度"，XFF 是否透传不影响可用性（比照直连侧更宽松）
+- 客户端接入：App「接口」页新增自定义供应商，baseUrl 填 `https://picai.applecabal.us.ci/v1`，imageModels 加 `gpt-image-2`
+- 限制提醒：Workers 免费版单请求 50 个子请求上限，Worker 内轮询上限已压到 40 次；上游收紧游客策略时整条通道（直连+Worker）同时失效
