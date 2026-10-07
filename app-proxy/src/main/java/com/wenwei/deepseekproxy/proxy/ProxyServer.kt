@@ -491,11 +491,20 @@ object ProxyServer {
         )
     }
 
+    /**
+     * CNB /ai/chat/completions 接受的上游模型白名单（对齐墨🐳 v1.0.13 的
+     * CNB_KNOWN_MODELS）。混元3/4、DeepSeek V4.x（含 4.1 各档）、GLM、Kimi 等
+     * 均经同一 cnb.cool 登录会话透传；未列出的 id 一律回落 [CnbClient.DEFAULT_MODEL]。
+     */
+    private val cnbKnownModels = setOf(
+        "hy3-preview", "hy4-preview", "DSCoder-max",
+        "deepseek-v4.1-flash", "deepseek-v4.1-flash-high", "deepseek-v4.1-flash-low",
+        "deepseek-v4-pro", "deepseek-v4-flash",
+        "glm-5.3", "glm-5.3-flash", "glm-5.2", "kimi-k3",
+    )
+
     private fun mapModel(m: String): String {
-        return when (m) {
-            "hy3-preview", "glm-5.2", "deepseek-v4-pro", "deepseek-v4-flash" -> m
-            else -> CnbClient.DEFAULT_MODEL
-        }
+        return if (m in cnbKnownModels) m else CnbClient.DEFAULT_MODEL
     }
 
     private suspend fun RoutingContext.handleCompatibilityProxyPost() {

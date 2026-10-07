@@ -11,7 +11,9 @@ enum class WebProviderType(
     val loginUrl: String?,
     val cookieOrigins: List<String>
 ) {
-    CNB("混元 / CNB", "https://cnb.cool/", listOf("https://cnb.cool", "https://cnb.cool/")),
+    // loginUrl 直达 /explore AI 会话界面（墨🐳 v1.0.13 对齐）：浏览器页选 CNB
+    // 打开即是对话页，登录后模型立即可用，无需再手动导航。
+    CNB("混元 / CNB", "https://cnb.cool/explore", listOf("https://cnb.cool", "https://cnb.cool/")),
     DOUBAO_WEB(
         "豆包",
         "https://www.doubao.com/chat/",
@@ -172,6 +174,16 @@ object ProviderCatalog {
             WebProviderType.CNB,
             setOf(ProviderCapability.CHAT, ProviderCapability.STREAMING),
             enabled = true
+        ),
+        // CNB 通道 DeepSeek V4.1 Flash（移植自墨🐳）：同一 cnb.cool 登录会话，
+        // /ai/chat/completions 透传 model=deepseek-v4.1-flash。
+        ProviderModel(
+            "cnb-deepseek-v4.1-flash",
+            "DeepSeek V4.1 Flash（CNB）",
+            WebProviderType.CNB,
+            setOf(ProviderCapability.CHAT, ProviderCapability.STREAMING),
+            enabled = true,
+            upstreamModelId = "deepseek-v4.1-flash",
         ),
         ProviderModel(
             "doubao",

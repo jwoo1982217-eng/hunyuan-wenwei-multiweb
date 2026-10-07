@@ -50,7 +50,9 @@ object CnbClient {
     /** 上次成功获取凭证的时间戳（用于 8 小时限频）。 */
     @Volatile private var lastAuthTime = 0L
 
-    private val csrfKeyRe = Regex("csrfkey=([a-f0-9]{32})", RegexOption.IGNORE_CASE)
+    // csrfkey 格式已不限于 32 位 hex（墨🐳 v1.0.13 放宽为通用 token 字符集）；
+    // 值域不含 '='';'，在 Set-Cookie 拼接串上截断安全。
+    private val csrfKeyRe = Regex("csrfkey=([A-Za-z0-9_-]+)", RegexOption.IGNORE_CASE)
     private val nextDataRe =
         Regex("""<script[^>]*id=["']__NEXT_DATA__["'][^>]*>([\s\S]*?)</script>""")
 
