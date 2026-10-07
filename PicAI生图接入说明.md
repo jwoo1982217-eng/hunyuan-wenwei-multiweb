@@ -1,10 +1,10 @@
 # PicAI 生图接入说明（给其他 AI / 维护者）
 
-> 本文记录 2026-10-08 在 `workbuddy` 分支上为混元太极-MultiWeb 接入 PicAI 生图后端（picai.com，GPT Image 2）的完整实现与注意事项。提交 tag：`picai-gpt-image-2-20261008`。
+> 本文记录 2026-10-08 在 `workbuddy` 分支上为混元太极-MultiWeb 接入 PicAI 生图后端（picai.com，GPT Image 2）的完整实现与注意事项。提交 tag：`picai-gpt-image-2-20261008`（初版 v1.0.43）、`picai-cookie-session-20261008`（会话修复 v1.0.44）。
 
 ## 一句话概括
 
-App 内网关中新增「PicAI 生图」供应商：手机直连 `picai.com` 的 `/api/fal/*` 匿名生图通道，**每次生图现算一个新随机 XFF 身份**实现额度无限刷新，向 `/v1/images/generations` 调用方提供 `picai-gpt-image-2`（GPT Image 2 文生图）。
+App 内网关中新增「PicAI 生图」供应商：手机直连 `picai.com` 的 `/api/fal/*` 匿名生图通道，**每次生图一套全新身份（新随机 XFF + 独立 Cookie 会话）**实现额度无限刷新，向 `/v1/images/generations` 调用方提供 `picai-gpt-image-2`（GPT Image 2 文生图）。
 
 ## 改动清单
 
@@ -46,21 +46,25 @@ App 内网关中新增「PicAI 生图」供应商：手机直连 `picai.com` 的
 | C1 | **新 Cookie + 复用 A 的 XFF** | ❌ 立刻 `402` |
 | B1 | 全新身份 | ✅ 又成功 |
 
-结论：
+结论（两层钥匙，缺一不可）：
 
-- **额度键 = `X-Forwarded-For` 头里的 IP，与 Cookie 无关**（C1 是关键证据）。
-- 游客额度语义：每个新 IP **首次生图免费放行**（响应显示 credits=2 < cost=3 仍放行），同 IP 第二次起 402。
-- 因此每次生图 mint 一个新随机公网 IPv4 即"无限"（IPv4 随机空间约 40 亿）。同一次生图的提交+轮询必须复用同一身份。
+- **额度钥匙 = `X-Forwarded-For` 头里的 IP**：每个新 IP 首次生图免费放行（响应 credits=2 < cost=3 仍放行），同 IP 第二次起 `402 insufficient_credits`。Cookie 与额度无关。
+- **轮询门票 = 会话 Cookie（picai_sid）**：提交响应 `set-cookie picai_sid=…`，`GET /api/fal/jobs/{jobId}` 校验任务归属，**不带这个 Cookie 直接 `{"error":"forbidden"}` 403**——App 内 curl `-v` 抓包实锤：同一会话提交 200 → 无 Cookie 轮询 403。
+- 因此"无限" = **每个生图任务一套全新身份（新 XFF + 新 CookieJar）**：提交拿到新会话 Cookie，轮询复用它；下个任务再换全新身份（IPv4 随机空间约 40 亿）。
 - `402/429/403/5xx/连接故障` → 换新身份重试（上限 4 次）；其余 4xx 属参数错误，直接抛给调用方。
-- 注意网上流传的"refresh 新 cookie 就能无限"说法不准确——cookie 是幌子，XFF 才是钥匙。
+- 注意"refresh 新 cookie 就能无限"只对一半：**新 cookie 开新会话刷额度（配合新 XFF），但轮询又必须复用本会话的 cookie**——无状态客户端会死在轮询这一步。
+
+### 排障血泪史（别再踩：测试要覆盖全链路每一跳）
+
+初版移植只丢了 Cookie 一件事，却引发一连串假象：手动 curl 测的全是**提交**这一跳（轮询从未测过），空包测试更是被参数校验挡在门外——"链路没问题"的假象把排查引向 TLS 指纹/尺寸/出口 IP/UID 一连串冤案。最终靠 App 内 curl `-v` 抓包（提交 200 + 无 Cookie 轮询 403）一锤定音。**教训：接入类任务必须端到端验证每一跳（提交→轮询→取结果），优先对比同一请求在可用/故障通道的完整交换过程，而不是逐个猜变量。**
 
 ## 关键限制（踩过的坑，别再踩）
 
-- **机房/代理出口有被封风险**：与 AppBMS 同理，OkHttp 必须 `Proxy.NO_PROXY` 直连，只保证手机流量/家庭宽带。402/403 持续出现时提示用户切换网络。
+- **传输栈**：主传输 exec 系统自带 `/system/bin/curl`（真机实测可过；ProcessBuilder 直 exec 不经 shell，body 逐参数传入），每身份一个独立 CookieJar 文件（`-c/-b`），用完即删；curl 不可用时回落 OkHttp（v1.0.44 起兜底栈也带会话 CookieJar）。机房/代理出口在实测中未被封（东京/新加坡出口均通过），但仍建议直连。
 - 只接了**文生图**：App 生图路由只收 prompt/size。picai 的图生图（`/api/fal/upload` dataUrl 上传 + `gpt-image-2-edit`）暂未接入，需要时再扩展。
 - 结果 URL 为上游转存地址（fal.media），**有回收周期**，客户端拿到后及时转存。
-- 上游若改为按真实 TCP 源 IP 计数或校验 XFF，"无限"失效——届时表现为持续 402/429，属上游策略变更，非本服务故障（把模型下架或挂提示即可）。
-- 单文件网关参考实现 picai-relay（含 deploy.bat/start.vbs 等 Windows 部署件）在分析目录 `.tmp_wxgpt2/extracted/`，不随本仓库分发。
+- 上游若改为按真实 TCP 源 IP 计数或收紧游客策略，"无限"失效——届时表现为持续 402/429/403，属上游策略变更，非本服务故障（把模型下架或挂提示即可）。
+- 单文件网关参考实现 picai-relay（含 deploy.bat/start.vbs 等 Windows 部署件）在分析目录 `.tmp_wxgpt2/extracted/` 与 `picai_deploy(2).zip`，不随本仓库分发。
 
 ## 构建
 
@@ -70,7 +74,7 @@ JAVA_HOME="/Applications/Android Studio.app/Contents/jbr/Contents/Home" \
   ./gradlew :app-proxy:assembleDebug :app-proxy:testDebugUnitTest
 ```
 
-产物：`app-proxy/build/outputs/apk/debug/app-proxy-debug.apk`（工程惯例 debug 签名直装，勿改正式签名）。本批交付命名：`混元太极-MultiWeb-1.0.43-picai生图-arm64-debug.apk`。
+产物：`app-proxy/build/outputs/apk/debug/app-proxy-debug.apk`（工程惯例 debug 签名直装，勿改正式签名）。本批交付命名：`混元太极-MultiWeb-1.0.44-picai生图-arm64-debug.apk`。
 
 ## 验收方法
 
