@@ -7,3 +7,27 @@ local.properties
 .idea/
 
 picai_relay_key.txt
+
+# Local artifacts and private configuration
+.DS_Store
+**/.DS_Store
+.kotlin/
+build-delivery/
+*.apk
+*.aab
+*.jks
+*.keystore
+.env
+.env.*
+!.env.example
+.dev.vars
+.dev.vars.*
+.analysis/
+.tmp*/
+androguard.db
+*-study/
+qoder-openai-relay-source/
+qoder-openai-relay-skill/
+sub2api-skill/
+sub2api-skill.md
+node_modules/

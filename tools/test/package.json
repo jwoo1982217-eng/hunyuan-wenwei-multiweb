@@ -1,0 +1,11 @@
+{
+  "name": "hunyuan-web-chat-observer-tests",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "test": "node web-chat-observer.test.cjs"
+  },
+  "devDependencies": {
+    "jsdom": "26.1.0"
+  }
+}
